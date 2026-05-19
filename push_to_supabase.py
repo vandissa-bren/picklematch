@@ -197,26 +197,35 @@ async def scrape_pbp_venue(
 
             # Sessions (across all dates).
             try:
-                programs = await api._get_json(
+                programs_resp = await api._get_json(
                     "/api/public/clinics",
-                    params={"search": "", "facility_id": facility_id},
+                    params={"search": "", "facility_id": facility_id, "per_page": 50},
                 )
-                clinic_stubs = programs if isinstance(programs, list) else (programs or {}).get("clinics") or []
+                # Response is {"clinics": [...]} not a bare list
+                if isinstance(programs_resp, dict):
+                    clinic_stubs = programs_resp.get("clinics") or []
+                elif isinstance(programs_resp, list):
+                    clinic_stubs = programs_resp
+                else:
+                    clinic_stubs = []
+
                 date_strs = {d.isoformat() for d in dates}
 
                 for stub in clinic_stubs:
-                    program_slug = stub.get("slug") or ""
                     program_name = stub.get("name", "Session")
-                    lessons = stub.get("sessions") or stub.get("clinic_lessons") or []
+                    program_url = stub.get("url") or ""
+                    # Extract slug from url like /programs/social-open-play-a2af7d
+                    program_slug = program_url.split("/programs/")[-1] if "/programs/" in program_url else ""
 
-                    if program_slug and not any(l.get("lesson_date") for l in lessons):
+                    # Fetch individual session dates via React props.
+                    lessons = []
+                    if program_slug:
                         try:
                             html = await api.program_detail_html(program_slug)
                             props = _extract_react_props_from_html(html)
-                            enriched = props.get("sessions") or props.get("clinic_lessons") or []
-                            if enriched:
-                                lessons = enriched
-                                program_name = props.get("name") or program_name
+                            lessons = (props.get("sessions")
+                                       or props.get("clinic_lessons") or [])
+                            program_name = props.get("name") or program_name
                         except Exception:
                             pass
 
