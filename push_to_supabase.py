@@ -1,0 +1,375 @@
+"""
+push_to_supabase.py  —  Scrape availability locally and push to Supabase.
+
+Runs on your local machine (has valid PBP cookies + real IP).
+Pushes results every 30 minutes so Railway API can serve them instantly.
+
+Setup:
+    pip install supabase
+    python push_to_supabase.py              # run once
+    python push_to_supabase.py --watch      # run every 30 mins forever
+
+Add to Windows Task Scheduler to run automatically.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import argparse
+import sys
+from datetime import date, datetime, timedelta
+from pathlib import Path
+
+from supabase import create_client, Client
+
+# ── Supabase REST helper (no supabase package needed) ─────────────────────────
+
+async def supabase_upsert(records: list[dict]) -> None:
+    """Upsert records into availability_cache via Supabase REST API."""
+    if not records:
+        return
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+        "Prefer": "resolution=merge-duplicates",
+    }
+    url = f"{SUPABASE_URL}/rest/v1/availability_cache"
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.post(url, json=records, headers=headers)
+        if resp.status_code not in (200, 201):
+            console.print(f"  [red]Supabase error {resp.status_code}: {resp.text[:200]}[/red]")
+from rich.console import Console
+
+sys.path.insert(0, str(Path(__file__).parent))
+from extract_thejar import PlayByPointAPI, _load_cached_session, _extract_react_props_from_html
+from extract_opensports import OpenSportsAPI, parse_session
+from extract_sportlogic import SportLogicClient, VENUES as SL_VENUES
+
+console = Console()
+
+SUPABASE_URL = "https://stwohmddmdwttasbyblt.supabase.co"
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InN0d29obWRkbWR3dHRhc2J5Ymx0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg3MjQ3OTMsImV4cCI6MjA5NDMwMDc5M30.x7VcVmJZ35S1uZy9_SU5RlB_MnuLziX2v81y9l02Yy8"
+
+PBP_SLUG_MAP: dict[int, str] = {
+    597:  "nplpickleball",
+    885:  "sportswellpickleballpalace",
+    1009: "easternindoorpickleballclub",
+    1379: "pickleholic",
+    1355: "statepickleballcentre",
+    1383: "MelbournePickleClub",
+    1485: "picklehaus",
+    755:  "leveluppickleballknoxcity",
+    1584: "theroompickleball",
+    1461: "therealdill",
+    1532: "pickleplex",
+    1557: "dinkndrivepickleballclub",
+    1119: "swingandserve",
+    1487: "Pickle-Playground",
+    1664: "TheRallyPickleball",
+    1714: "RunwayPickleball",
+}
+
+DAYS_AHEAD = 7
+
+
+def _sec_to_hhmm(sec: int) -> str:
+    h = sec // 3600
+    m = (sec % 3600) // 60
+    return f"{h:02d}:{m:02d}"
+
+
+async def scrape_pbp_venue(
+    cookies: dict, user_id: int,
+    facility_id: int, name: str, slug: str,
+    dates: list[date],
+) -> dict:
+    """Scrape court blocks + sessions for one PBP venue across multiple dates."""
+    result = {
+        "id": facility_id,
+        "name": name,
+        "slug": slug,
+        "platform": "playbypoint",
+        "by_date": {},
+        "sessions": [],
+    }
+
+    if not slug:
+        return result
+
+    try:
+        async with PlayByPointAPI(cookies=cookies, club_slug=slug) as api:
+            api._user_id = user_id
+
+            # Surface detection.
+            surface = "pickleball"
+            try:
+                ct = await api.court_types(facility_id)
+                ps = [s for s in (ct or []) if "pickle" in (s.get("surface") or "").lower()]
+                if ps:
+                    surface = ps[0]["surface"]
+            except Exception:
+                pass
+
+            # Scrape each date.
+            for target_date in dates:
+                date_str = target_date.isoformat()
+                court_blocks = []
+                try:
+                    hours_data = await api.available_hours(facility_id, target_date, surface=surface)
+                    all_slots = (hours_data or {}).get("available_hours") or [] \
+                        if isinstance(hours_data, dict) else (hours_data or [])
+
+                    court_slots: dict[str, list[int]] = {}
+                    for slot in all_slots:
+                        if not isinstance(slot, dict) or not slot.get("available"):
+                            continue
+                        sec = slot.get("seconds_from_midnight")
+                        if not isinstance(sec, (int, float)):
+                            continue
+                        try:
+                            courts = await api.available_courts(
+                                facility_id, target_date,
+                                int(sec), int(sec) + 1800, surface=surface,
+                            )
+                            for court in (courts or []):
+                                cid = court.get("id") or court.get("name") or "?"
+                                cname = court.get("name") or str(cid)
+                                key = f"{cid}|{cname}"
+                                court_slots.setdefault(key, []).append(int(sec))
+                        except Exception:
+                            pass
+
+                    for court_key, secs in court_slots.items():
+                        cname = court_key.split("|", 1)[1]
+                        secs_sorted = sorted(set(secs))
+                        run_start = run_end = None
+                        for s in secs_sorted:
+                            if run_start is None:
+                                run_start = run_end = s
+                            elif s == run_end + 1800:
+                                run_end = s
+                            else:
+                                dur = (run_end - run_start) // 60 + 30
+                                if dur >= 60:
+                                    court_blocks.append({
+                                        "court": cname,
+                                        "start": _sec_to_hhmm(run_start),
+                                        "end": _sec_to_hhmm(run_end + 1800),
+                                        "duration_min": dur,
+                                    })
+                                run_start = run_end = s
+                        if run_start is not None:
+                            dur = (run_end - run_start) // 60 + 30
+                            if dur >= 60:
+                                court_blocks.append({
+                                    "court": cname,
+                                    "start": _sec_to_hhmm(run_start),
+                                    "end": _sec_to_hhmm(run_end + 1800),
+                                    "duration_min": dur,
+                                })
+
+                except Exception as e:
+                    console.print(f"    [yellow]slots error for {name} {date_str}: {e}[/yellow]")
+
+                result["by_date"][date_str] = sorted(court_blocks, key=lambda x: (x["start"], x["court"]))
+
+            # Sessions (across all dates).
+            try:
+                programs = await api._get_json(
+                    "/api/public/clinics",
+                    params={"search": "", "facility_id": facility_id},
+                )
+                clinic_stubs = programs if isinstance(programs, list) else (programs or {}).get("clinics") or []
+                date_strs = {d.isoformat() for d in dates}
+
+                for stub in clinic_stubs:
+                    program_slug = stub.get("slug") or ""
+                    program_name = stub.get("name", "Session")
+                    lessons = stub.get("sessions") or stub.get("clinic_lessons") or []
+
+                    if program_slug and not any(l.get("lesson_date") for l in lessons):
+                        try:
+                            html = await api.program_detail_html(program_slug)
+                            props = _extract_react_props_from_html(html)
+                            enriched = props.get("sessions") or props.get("clinic_lessons") or []
+                            if enriched:
+                                lessons = enriched
+                                program_name = props.get("name") or program_name
+                        except Exception:
+                            pass
+
+                    for lesson in lessons:
+                        if lesson.get("lesson_date") not in date_strs:
+                            continue
+                        hs = lesson.get("hour_start", 0)
+                        he = lesson.get("hour_end", hs + 3600)
+                        capacity = lesson.get("capacity") or stub.get("capacity") or 0
+                        player_count = lesson.get("player_count", 0)
+                        spots_left = max(0, capacity - player_count) if capacity else None
+                        if spots_left == 0:
+                            continue
+                        price = ""
+                        ind = lesson.get("individual_prices") or []
+                        if ind:
+                            amounts = [p.get("price", 0) for p in ind if p.get("price")]
+                            if amounts:
+                                price = f"${min(amounts):.0f}"
+                        if not price:
+                            pv = stub.get("price") or stub.get("fee")
+                            if pv:
+                                price = f"${float(pv):.0f}"
+
+                        result["sessions"].append({
+                            "title": program_name,
+                            "type": stub.get("category") or "Session",
+                            "date": lesson.get("lesson_date"),
+                            "start": _sec_to_hhmm(hs),
+                            "end": _sec_to_hhmm(he),
+                            "price": price,
+                            "spots_left": spots_left,
+                            "capacity": capacity,
+                        })
+            except Exception as e:
+                console.print(f"    [yellow]sessions error for {name}: {e}[/yellow]")
+
+    except Exception as e:
+        console.print(f"    [red]error for {name}: {e}[/red]")
+
+    return result
+
+
+async def scrape_opensports(dates: list[date]) -> list[dict]:
+    """Scrape OpenSports sessions."""
+    try:
+        async with OpenSportsAPI() as api:
+            raw = await api.search_sessions(
+                latitude=-37.815, longitude=144.966, radius_km=35, limit=200
+            )
+        sessions = [parse_session(s) for s in raw]
+        date_strs = {d.isoformat() for d in dates}
+        sessions = [s for s in sessions if s["date"] in date_strs and s["status"] != "Full"]
+        for s in sessions:
+            s.pop("raw", None)
+        return sessions
+    except Exception as e:
+        console.print(f"  [yellow]OpenSports error: {e}[/yellow]")
+        return []
+
+
+async def scrape_sportlogic(dates: list[date]) -> list[dict]:
+    """Scrape SportLogic availability."""
+    results = []
+    for vk, v in SL_VENUES.items():
+        try:
+            async with SportLogicClient(vk) as client:
+                by_date = {}
+                for d in dates:
+                    slots = await client.get_availability(d)
+                    by_date[d.isoformat()] = [
+                        {"court": s["court_name"], "time": s["time"]}
+                        for s in slots
+                    ]
+                results.append({
+                    "key": vk,
+                    "name": v["name"],
+                    "platform": "sportlogic",
+                    "by_date": by_date,
+                })
+        except Exception as e:
+            console.print(f"  [yellow]SportLogic {vk} error: {e}[/yellow]")
+    return results
+
+
+def push_to_supabase(sb, records: list[dict]) -> None:
+    """Upsert records into availability_cache table."""
+    asyncio.get_event_loop().run_until_complete(supabase_upsert(records))
+
+
+async def run_once():
+    console.print(f"\n[bold]🏓 PickleMatch → Supabase sync[/bold] · {datetime.now().strftime('%H:%M:%S')}\n")
+
+    dates = [date.today() + timedelta(days=i) for i in range(DAYS_AHEAD)]
+
+    # ── PlayByPoint ─────────────────────────────────────────────────────────
+    cookies, user_id, email = _load_cached_session()
+    if not cookies:
+        console.print("[red]No PBP session. Run the scraper first.[/red]")
+    else:
+        console.print(f"[dim]PBP session: {email}[/dim]")
+        console.print(f"Scraping {len(PBP_SLUG_MAP)} PBP venues × {DAYS_AHEAD} days…")
+
+        tasks = [
+            scrape_pbp_venue(cookies, user_id, fid, f"Venue {fid}", slug, dates)
+            for fid, slug in PBP_SLUG_MAP.items()
+        ]
+        pbp_results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        records = []
+        for r in pbp_results:
+            if isinstance(r, Exception):
+                continue
+            records.append({
+                "id": f"pbp-{r['id']}",
+                "venue_name": r["name"],
+                "platform": "playbypoint",
+                "date": date.today().isoformat(),
+                "data": r,
+                "updated_at": datetime.utcnow().isoformat(),
+            })
+            console.print(f"  [green]✓[/green] {r['name']} · {sum(len(v) for v in r['by_date'].values())} blocks · {len(r['sessions'])} sessions")
+
+        await supabase_upsert(records)
+        console.print(f"[green]✓ Pushed {len(records)} PBP venues to Supabase[/green]\n")
+
+    # ── OpenSports ───────────────────────────────────────────────────────────
+    console.print("Scraping OpenSports…")
+    os_sessions = await scrape_opensports(dates)
+    await supabase_upsert([{
+        "id": "opensports-melbourne",
+        "venue_name": "OpenSports Melbourne",
+        "platform": "opensports",
+        "date": date.today().isoformat(),
+        "data": {"sessions": os_sessions},
+        "updated_at": datetime.utcnow().isoformat(),
+    }])
+    console.print(f"[green]✓ Pushed {len(os_sessions)} OpenSports sessions[/green]\n")
+
+    # ── SportLogic ───────────────────────────────────────────────────────────
+    console.print("Scraping SportLogic…")
+    sl_results = await scrape_sportlogic(dates)
+    records = []
+    for r in sl_results:
+        records.append({
+            "id": f"sportlogic-{r['key']}",
+            "venue_name": r["name"],
+            "platform": "sportlogic",
+            "date": date.today().isoformat(),
+            "data": r,
+            "updated_at": datetime.utcnow().isoformat(),
+        })
+        console.print(f"  [green]✓[/green] {r['name']}")
+    await supabase_upsert(records)
+    console.print(f"[green]✓ Pushed {len(records)} SportLogic venues[/green]\n")
+
+    console.print(f"[bold green]Sync complete[/bold green] · {datetime.now().strftime('%H:%M:%S')}\n")
+
+
+async def watch(interval_minutes: int = 30):
+    while True:
+        await run_once()
+        console.print(f"[dim]Next sync in {interval_minutes} minutes…[/dim]")
+        await asyncio.sleep(interval_minutes * 60)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--watch", action="store_true", help="Run continuously every 30 mins")
+    parser.add_argument("--interval", type=int, default=30, help="Interval in minutes (default: 30)")
+    args = parser.parse_args()
+
+    if args.watch:
+        asyncio.run(watch(args.interval))
+    else:
+        asyncio.run(run_once())

@@ -82,11 +82,32 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Restrict to your Bolt domain in production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ── Supabase REST helper ─────────────────────────────────────────────────────
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://stwohmddmdwttasbyblt.supabase.co")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InN0d29obWRkbWR3dHRhc2J5Ymx0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg3MjQ3OTMsImV4cCI6MjA5NDMwMDc5M30.x7VcVmJZ35S1uZy9_SU5RlB_MnuLziX2v81y9l02Yy8")
+
+
+async def _read_from_supabase(platform: str) -> list[dict]:
+    """Read cached availability data from Supabase REST API."""
+    try:
+        headers = {
+            "apikey": SUPABASE_KEY,
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+        }
+        url = f"{SUPABASE_URL}/rest/v1/availability_cache?platform=eq.{platform}&select=data"
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(url, headers=headers)
+            if resp.status_code == 200:
+                return [row["data"] for row in resp.json() if row.get("data")]
+    except Exception as e:
+        logger.error(f"Supabase read error: {e}")
+    return []
 
 # ── Slug map for saved venues ───────────────────────────────────────────────
 PBP_SLUG_MAP: dict[int, str] = {
@@ -383,8 +404,18 @@ async def health():
 
 @app.get("/api/pbp/venues")
 async def pbp_venues():
-    """List all saved PBP venues."""
-    venues = await _get_pbp_venues()
+    """List all saved PBP venues from Supabase cache."""
+    cached = await _read_from_supabase("playbypoint")
+    venues = [
+        {"id": r["id"], "name": r["name"], "slug": r["slug"], "platform": "playbypoint"}
+        for r in cached if r.get("id")
+    ]
+    # Fallback to slug map if cache empty
+    if not venues:
+        venues = [
+            {"id": fid, "name": f"Venue {fid}", "slug": slug, "platform": "playbypoint"}
+            for fid, slug in PBP_SLUG_MAP.items()
+        ]
     return {"venues": venues, "count": len(venues)}
 
 
@@ -396,47 +427,59 @@ async def pbp_availability(
     venue_ids: Optional[str] = Query(None, description="Comma-separated IDs, default all saved"),
 ):
     """
-    Get court blocks + sessions for PBP venues.
-
-    Example:
-        GET /api/pbp/availability?date=2026-05-20&from=18:00&to=22:00
-        GET /api/pbp/availability?venue_ids=597,1383,1485
+    Get court blocks + sessions for PBP venues from Supabase cache.
+    Data is populated by push_to_supabase.py running locally.
     """
     target_date = (datetime.strptime(date, "%Y-%m-%d").date()
                    if date else datetime.today().date())
+    date_str = target_date.isoformat()
     from_sec = _hhmm_to_sec(from_time)
     to_sec = _hhmm_to_sec(to_time)
 
-    venues = await _get_pbp_venues()
+    # Read from Supabase cache.
+    cached = await _read_from_supabase("playbypoint")
 
-    # Filter to requested venue IDs if provided.
     if venue_ids:
         ids = {int(i.strip()) for i in venue_ids.split(",")}
-        venues = [v for v in venues if v["id"] in ids]
-
-    # Scan all venues in parallel.
-    tasks = [
-        _get_pbp_availability(
-            v["id"], v["name"], v["slug"],
-            target_date, from_sec, to_sec,
-        )
-        for v in venues
-    ]
-    results = await asyncio.gather(*tasks, return_exceptions=True)
+        cached = [r for r in cached if r.get("id") in ids]
 
     output = []
-    for r in results:
-        if isinstance(r, Exception):
-            continue
-        output.append(r)
+    for r in cached:
+        # Get court blocks for the requested date, filtered by time window.
+        by_date = r.get("by_date", {})
+        all_blocks = by_date.get(date_str, [])
+        filtered_blocks = [
+            b for b in all_blocks
+            if from_sec <= _hhmm_to_sec(b["start"]) < to_sec
+        ]
+
+        # Get sessions for the requested date, filtered by time window.
+        all_sessions = r.get("sessions", [])
+        filtered_sessions = [
+            s for s in all_sessions
+            if s.get("date") == date_str
+            and from_sec <= _hhmm_to_sec(s["start"]) < to_sec
+        ]
+
+        output.append({
+            "id": r.get("id"),
+            "name": r.get("name"),
+            "slug": r.get("slug"),
+            "platform": "playbypoint",
+            "court_blocks": filtered_blocks,
+            "sessions": filtered_sessions,
+            "error": None,
+        })
 
     return {
-        "date": target_date.isoformat(),
+        "date": date_str,
         "from": from_time,
         "to": to_time,
         "venues": output,
         "total_court_blocks": sum(len(v["court_blocks"]) for v in output),
         "total_sessions": sum(len(v["sessions"]) for v in output),
+        "source": "supabase_cache",
+        "cached_count": len(output),
     }
 
 
@@ -447,26 +490,46 @@ async def pbp_single_venue(
     from_time: str = Query("00:00", alias="from"),
     to_time: str = Query("23:30", alias="to"),
 ):
-    """Get availability for a single PBP venue."""
+    """Get availability for a single PBP venue from Supabase cache."""
     target_date = (datetime.strptime(date, "%Y-%m-%d").date()
                    if date else datetime.today().date())
-    slug = PBP_SLUG_MAP.get(facility_id, "")
-    name = f"Venue {facility_id}"
+    date_str = target_date.isoformat()
+    from_sec = _hhmm_to_sec(from_time)
+    to_sec = _hhmm_to_sec(to_time)
 
-    # Try to get name from saved venues.
-    venues = await _get_pbp_venues()
-    for v in venues:
-        if v["id"] == facility_id:
-            name = v["name"]
-            if not slug:
-                slug = v["slug"]
-            break
+    cached = await _read_from_supabase("playbypoint")
+    for r in cached:
+        if r.get("id") == facility_id:
+            by_date = r.get("by_date", {})
+            all_blocks = by_date.get(date_str, [])
+            filtered_blocks = [
+                b for b in all_blocks
+                if from_sec <= _hhmm_to_sec(b["start"]) < to_sec
+            ]
+            filtered_sessions = [
+                s for s in r.get("sessions", [])
+                if s.get("date") == date_str
+                and from_sec <= _hhmm_to_sec(s["start"]) < to_sec
+            ]
+            return {
+                "id": facility_id,
+                "name": r.get("name"),
+                "slug": r.get("slug"),
+                "platform": "playbypoint",
+                "court_blocks": filtered_blocks,
+                "sessions": filtered_sessions,
+                "error": None,
+            }
 
-    result = await _get_pbp_availability(
-        facility_id, name, slug,
-        target_date, _hhmm_to_sec(from_time), _hhmm_to_sec(to_time),
-    )
-    return result
+    return {
+        "id": facility_id,
+        "name": f"Venue {facility_id}",
+        "slug": PBP_SLUG_MAP.get(facility_id, ""),
+        "platform": "playbypoint",
+        "court_blocks": [],
+        "sessions": [],
+        "error": "not_in_cache",
+    }
 
 
 # ── OpenSports ──────────────────────────────────────────────────────────────
@@ -740,15 +803,3 @@ if __name__ == "__main__":
         reload=False,
         log_level="info",
     )
-
-@app.get("/api/debug/session")
-async def debug_session():
-    cookies, user_id, email = _load_session_with_env_fallback()
-    return {
-        "has_cookies": bool(cookies),
-        "cookie_count": len(cookies),
-        "user_id": user_id,
-        "email": email,
-        "cookie_keys": list(cookies.keys()) if cookies else [],
-        "env_var_set": bool(os.environ.get("PBP_COOKIES_JSON")),
-    }
