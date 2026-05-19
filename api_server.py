@@ -43,7 +43,7 @@ def _load_session_with_env_fallback():
     Falls back to PBP_COOKIES_JSON environment variable (for Railway deployment).
     """
     # Try local cache first.
-    cookies, user_id, email = _load_session_with_env_fallback()
+    cookies, user_id, email = _load_cached_session()
     if cookies:
         return cookies, user_id, email
 
