@@ -18,6 +18,7 @@ import asyncio
 import json
 import argparse
 import sys
+import httpx
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
