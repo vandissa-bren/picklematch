@@ -7,3 +7,4 @@ typer
 rich
 beautifulsoup4
 loguru
+tenacity
