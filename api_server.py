@@ -17,6 +17,7 @@ For production, run behind nginx or deploy to Railway/Render/Fly.io.
 from __future__ import annotations
 
 import asyncio
+import httpx
 import json
 import logging
 import os
