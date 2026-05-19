@@ -24,6 +24,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
 import sys
+import httpx
 
 import uvicorn
 from fastapi import FastAPI, Query, HTTPException
@@ -398,6 +399,27 @@ async def _get_pbp_availability(
 @app.get("/api/health")
 async def health():
     return {"status": "ok", "time": datetime.utcnow().isoformat()}
+
+
+@app.get("/api/debug/supabase")
+async def debug_supabase():
+    """Debug endpoint to check Supabase connectivity and data."""
+    try:
+        headers = {
+            "apikey": SUPABASE_KEY,
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+        }
+        url = f"{SUPABASE_URL}/rest/v1/availability_cache?select=id,platform,venue_name&limit=5"
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(url, headers=headers)
+            return {
+                "status_code": resp.status_code,
+                "supabase_url": SUPABASE_URL,
+                "rows": resp.json() if resp.status_code == 200 else [],
+                "error": resp.text if resp.status_code != 200 else None,
+            }
+    except Exception as e:
+        return {"error": str(e)}
 
 
 # ── PlayByPoint ─────────────────────────────────────────────────────────────
