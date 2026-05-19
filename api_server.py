@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
@@ -36,6 +37,15 @@ from extract_thejar import (
     _load_cached_session,
     _extract_react_props_from_html,
 )
+from extract_opensports import OpenSportsAPI, parse_session
+from extract_sportlogic import (
+    SportLogicClient,
+    VENUES as SL_VENUES,
+    _load_session as sl_load_session,
+    _ensure_valid_session,
+)
+
+logger = logging.getLogger("pickleball_api")
 
 def _load_session_with_env_fallback():
     """
@@ -62,13 +72,6 @@ def _load_session_with_env_fallback():
             logger.error(f"Failed to parse PBP_COOKIES_JSON: {e}")
 
     return {}, 0, ""
-from extract_opensports import OpenSportsAPI, parse_session
-from extract_sportlogic import (
-    SportLogicClient,
-    VENUES as SL_VENUES,
-    _load_session as sl_load_session,
-    _ensure_valid_session,
-)
 
 # ── App setup ───────────────────────────────────────────────────────────────
 app = FastAPI(
@@ -84,8 +87,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-logger = logging.getLogger("pickleball_api")
 
 # ── Slug map for saved venues ───────────────────────────────────────────────
 PBP_SLUG_MAP: dict[int, str] = {
