@@ -36,6 +36,32 @@ from extract_thejar import (
     _load_cached_session,
     _extract_react_props_from_html,
 )
+
+def _load_session_with_env_fallback():
+    """
+    Load PBP session from local cache first.
+    Falls back to PBP_COOKIES_JSON environment variable (for Railway deployment).
+    """
+    # Try local cache first.
+    cookies, user_id, email = _load_session_with_env_fallback()
+    if cookies:
+        return cookies, user_id, email
+
+    # Fall back to environment variable.
+    raw = os.environ.get("PBP_COOKIES_JSON", "")
+    if raw:
+        try:
+            data = json.loads(raw)
+            cookies = data.get("cookies", {})
+            user_id = data.get("user_id", 0)
+            email = data.get("email", "")
+            if cookies:
+                logger.info(f"Loaded PBP cookies from PBP_COOKIES_JSON env var (user: {email})")
+                return cookies, user_id, email
+        except Exception as e:
+            logger.error(f"Failed to parse PBP_COOKIES_JSON: {e}")
+
+    return {}, 0, ""
 from extract_opensports import OpenSportsAPI, parse_session
 from extract_sportlogic import (
     SportLogicClient,
@@ -96,7 +122,7 @@ def _hhmm_to_sec(s: str) -> int:
 
 async def _get_pbp_venues() -> list[dict]:
     """Get all saved PBP venues with slugs resolved."""
-    cookies, user_id, _ = _load_cached_session()
+    cookies, user_id, _ = _load_session_with_env_fallback()
     if not cookies:
         return []
 
@@ -157,7 +183,7 @@ async def _get_pbp_availability(
         result["error"] = "no_slug"
         return result
 
-    cookies, user_id, _ = _load_cached_session()
+    cookies, user_id, _ = _load_session_with_env_fallback()
     if not cookies:
         result["error"] = "no_session"
         return result
