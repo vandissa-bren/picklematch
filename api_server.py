@@ -740,3 +740,15 @@ if __name__ == "__main__":
         reload=False,
         log_level="info",
     )
+
+@app.get("/api/debug/session")
+async def debug_session():
+    cookies, user_id, email = _load_session_with_env_fallback()
+    return {
+        "has_cookies": bool(cookies),
+        "cookie_count": len(cookies),
+        "user_id": user_id,
+        "email": email,
+        "cookie_keys": list(cookies.keys()) if cookies else [],
+        "env_var_set": bool(os.environ.get("PBP_COOKIES_JSON")),
+    }
