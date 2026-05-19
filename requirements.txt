@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+httpx
+python-dotenv
+playwright
+typer
+rich
+beautifulsoup4
