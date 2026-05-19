@@ -91,6 +91,8 @@ VENUE_NAMES: dict[int, str] = {
     1714: "Runway Pickleball",
 }
 
+DAYS_AHEAD = 7
+
 
 def _sec_to_hhmm(sec: int) -> str:
     h = sec // 3600
