@@ -6,3 +6,4 @@ playwright
 typer
 rich
 beautifulsoup4
+loguru
