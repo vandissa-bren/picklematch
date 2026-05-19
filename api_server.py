@@ -24,7 +24,6 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
 import sys
-import httpx
 
 import uvicorn
 from fastapi import FastAPI, Query, HTTPException
@@ -101,11 +100,15 @@ async def _read_from_supabase(platform: str) -> list[dict]:
             "apikey": SUPABASE_KEY,
             "Authorization": f"Bearer {SUPABASE_KEY}",
         }
-        url = f"{SUPABASE_URL}/rest/v1/availability_cache?platform=eq.{platform}&select=data"
+        url = f"{SUPABASE_URL}/rest/v1/availability_cache?select=data&platform=eq.{platform}"
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.get(url, headers=headers)
+            logger.info(f"Supabase read {platform}: status={resp.status_code} rows={len(resp.json()) if resp.status_code == 200 else 'err'} url={url}")
             if resp.status_code == 200:
-                return [row["data"] for row in resp.json() if row.get("data")]
+                rows = resp.json()
+                result = [row["data"] for row in rows if row.get("data")]
+                logger.info(f"Supabase {platform}: {len(rows)} raw rows → {len(result)} with data")
+                return result
     except Exception as e:
         logger.error(f"Supabase read error: {e}")
     return []
