@@ -72,7 +72,24 @@ PBP_SLUG_MAP: dict[int, str] = {
     1714: "RunwayPickleball",
 }
 
-DAYS_AHEAD = 7
+VENUE_NAMES: dict[int, str] = {
+    597:  "The Jar | South Melbourne",
+    885:  "SportsWell | Pickleball Palace",
+    1009: "Eastern Indoor Pickleball Club",
+    1379: "PICKLEHOLIC",
+    1355: "State Pickleball Centre",
+    1383: "Melbourne Pickle Club",
+    1485: "Pickle Haus",
+    755:  "Level Up Pickleball Knox City",
+    1584: "The Room Pickleball",
+    1461: "The Real Dill | Ravenhall",
+    1532: "PicklePlex",
+    1557: "Dink & Drive Pickleball Club",
+    1119: "Swing & Serve",
+    1487: "Pickle Playground",
+    1664: "The Rally Pickleball | Altona",
+    1714: "Runway Pickleball",
+}
 
 
 def _sec_to_hhmm(sec: int) -> str:
@@ -302,7 +319,7 @@ async def run_once():
         console.print(f"Scraping {len(PBP_SLUG_MAP)} PBP venues × {DAYS_AHEAD} days…")
 
         tasks = [
-            scrape_pbp_venue(cookies, user_id, fid, f"Venue {fid}", slug, dates)
+            scrape_pbp_venue(cookies, user_id, fid, VENUE_NAMES.get(fid, f"Venue {fid}"), slug, dates)
             for fid, slug in PBP_SLUG_MAP.items()
         ]
         pbp_results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -313,7 +330,7 @@ async def run_once():
                 continue
             records.append({
                 "id": f"pbp-{r['id']}",
-                "venue_name": r["name"],
+                "venue_name": VENUE_NAMES.get(r["id"], r["name"]),
                 "platform": "playbypoint",
                 "date": date.today().isoformat(),
                 "data": r,
