@@ -219,13 +219,24 @@ async def scrape_pbp_venue(
 
                     # Fetch individual session dates via React props.
                     lessons = []
+                    program_price = ""
                     if program_slug:
                         try:
                             html = await api.program_detail_html(program_slug)
                             props = _extract_react_props_from_html(html)
                             lessons = (props.get("sessions")
                                        or props.get("clinic_lessons") or [])
-                            program_name = props.get("name") or program_name
+                            program_name = props.get("name") or props.get("clinic_name") or program_name
+
+                            # Extract price from props["prices"] (non-member shown rate)
+                            # Show lowest available non-hidden price
+                            all_prices = []
+                            for price_list in (props.get("prices") or [], props.get("packages") or []):
+                                for p in price_list:
+                                    if not p.get("hidden") and p.get("available_for_players") and p.get("price"):
+                                        all_prices.append(float(p["price"]))
+                            if all_prices:
+                                program_price = f"${min(all_prices):.0f}"
                         except Exception:
                             pass
 
@@ -245,6 +256,12 @@ async def scrape_pbp_venue(
                             amounts = [p.get("price", 0) for p in ind if p.get("price")]
                             if amounts:
                                 price = f"${min(amounts):.0f}"
+                        if not price:
+                            pv = lesson.get("price") or lesson.get("fee")
+                            if pv:
+                                price = f"${float(pv):.0f}"
+                        if not price:
+                            price = program_price  # from props["prices"]
                         if not price:
                             pv = stub.get("price") or stub.get("fee")
                             if pv:
