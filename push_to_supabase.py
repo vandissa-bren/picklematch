@@ -292,6 +292,28 @@ async def scrape_pbp_venue(
                             if pv:
                                 price = f"${float(pv):.0f}"
 
+                        # Fetch roster.
+                        roster = []
+                        lesson_id = lesson.get("id")
+                        if lesson_id:
+                            try:
+                                roster_data = await api._get_json(
+                                    "/api/public/clinics/lesson_players",
+                                    params={"lesson_id": lesson_id},
+                                )
+                                roster = [
+                                    {
+                                        "id": u.get("id"),
+                                        "name": u.get("name"),
+                                        "initials": u.get("name_initials"),
+                                        "avatar": u.get("avatar") or "",
+                                        "rating": u.get("rating"),
+                                    }
+                                    for u in (roster_data or {}).get("users", [])
+                                ]
+                            except Exception:
+                                pass
+
                         result["sessions"].append({
                             "title": program_name,
                             "type": stub.get("category") or "Session",
@@ -303,6 +325,8 @@ async def scrape_pbp_venue(
                             "capacity": capacity,
                             "description": description,
                             "skill_level": skill_level,
+                            "roster": roster,
+                            "lesson_id": lesson_id,
                         })
             except Exception as e:
                 console.print(f"    [yellow]sessions error for {name}: {e}[/yellow]")
