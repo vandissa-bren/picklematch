@@ -824,7 +824,8 @@ class BookingRequest(BaseModel):
     user_id: str
     lesson_id: int
     clinic_id: int
-    package_id: Optional[int] = None
+    plan_id: Optional[int] = None
+    program_slug: Optional[str] = None
 
 
 @app.post("/api/pbp/book")
@@ -860,44 +861,47 @@ async def pbp_book(req: BookingRequest):
 
     # Use the stored cookies to make the booking.
     try:
-        slug = PBP_SLUG_MAP.get(req.clinic_id, "nplpickleball")
+        slug = req.program_slug or PBP_SLUG_MAP.get(req.clinic_id, "")
         async with PlayByPointAPI(cookies=cookies, club_slug=slug) as api:
             api._user_id = pbp_user_id
 
-            # Get available packages for this lesson.
-            lesson_data = await api._get_json(f"/api/public/clinics/{req.clinic_id}")
-            clinic = (lesson_data or {}).get("clinic", {})
+            # Get plan_id if not provided.
+            plan_id = req.plan_id
+            if not plan_id:
+                lesson_data = await api._get_json(f"/api/public/clinics/{req.clinic_id}")
+                prices = (lesson_data or {}).get("prices") or []
+                packages = (lesson_data or {}).get("packages") or []
+                all_plans = prices + packages
+                # Pick lowest-price non-hidden single-session plan.
+                single = [p for p in all_plans if p.get("lessons") == 1 and not p.get("hidden") and p.get("available_for_players")]
+                if not single:
+                    single = [p for p in all_plans if not p.get("hidden") and p.get("available_for_players")]
+                if not single:
+                    raise HTTPException(status_code=400, detail="No available booking plan found for this session.")
+                plan_id = sorted(single, key=lambda p: p.get("price", 999))[0]["id"]
 
-            # Find the best package — prefer non-member single session.
-            packages = (lesson_data or {}).get("packages") or []
-            prices = (lesson_data or {}).get("prices") or []
-            all_packages = prices + packages
-            single = [p for p in all_packages if p.get("lessons") == 1 and not p.get("hidden") and p.get("available_for_players")]
-            if not single:
-                single = [p for p in all_packages if not p.get("hidden") and p.get("available_for_players")]
-
-            package_id = req.package_id or (single[0]["id"] if single else None)
-            if not package_id:
-                raise HTTPException(status_code=400, detail="No available booking package found for this session.")
-
-            # POST booking.
-            booking_resp = await api._post_json(
-                f"/api/public/clinics/{req.clinic_id}/enroll",
-                data={
-                    "clinic_lesson_id": req.lesson_id,
-                    "package_id": package_id,
-                    "user_id": pbp_user_id,
-                    "payment_type": "card",
-                },
+            # Make the real booking using the HAR-verified method.
+            result = await api.book_program(
+                clinic_id=req.clinic_id,
+                plan_id=plan_id,
+                clinic_lesson_ids=[req.lesson_id],
+                program_slug=slug,
+                payment_method="card",
+                dry_run=False,
             )
 
             return {
                 "success": True,
                 "message": "Booking confirmed!",
-                "booking": booking_resp,
+                "booking": result,
             }
 
     except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Booking failed: {e}")
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Booking failed: {e}")
