@@ -327,6 +327,7 @@ async def scrape_pbp_venue(
                             "skill_level": skill_level,
                             "roster": roster,
                             "lesson_id": lesson_id,
+                            "clinic_id": stub.get("id"),
                         })
             except Exception as e:
                 console.print(f"    [yellow]sessions error for {name}: {e}[/yellow]")
