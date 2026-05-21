@@ -818,6 +818,91 @@ async def _fetch_sportlogic(target_date: date, from_sec: int, to_sec: int) -> li
     return results
 
 
+# ── PBP Booking ───────────────────────────────────────────────────────────────
+
+class BookingRequest(BaseModel):
+    user_id: str
+    lesson_id: int
+    clinic_id: int
+    package_id: Optional[int] = None
+
+
+@app.post("/api/pbp/book")
+async def pbp_book(req: BookingRequest):
+    """
+    Book a PBP session on behalf of a user using their stored session cookies.
+    Requires the user to have connected their PBP account via the profile page.
+    """
+    # Fetch user's stored PBP cookies from Supabase.
+    try:
+        headers = {
+            "apikey": SUPABASE_KEY,
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+        }
+        url = f"{SUPABASE_URL}/rest/v1/pbp_credentials?user_id=eq.{req.user_id}&select=pbp_cookies,pbp_user_id,is_connected,session_valid_until"
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(url, headers=headers)
+            rows = resp.json() if resp.status_code == 200 else []
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Could not fetch user credentials: {e}")
+
+    if not rows:
+        raise HTTPException(status_code=401, detail="PBP account not connected. Please connect your account in Profile settings.")
+
+    row = rows[0]
+    if not row.get("is_connected"):
+        raise HTTPException(status_code=401, detail="PBP account disconnected. Please reconnect in Profile settings.")
+
+    cookies = row.get("pbp_cookies")
+    pbp_user_id = row.get("pbp_user_id")
+    if not cookies or not pbp_user_id:
+        raise HTTPException(status_code=401, detail="PBP session expired. Please reconnect in Profile settings.")
+
+    # Use the stored cookies to make the booking.
+    try:
+        slug = PBP_SLUG_MAP.get(req.clinic_id, "nplpickleball")
+        async with PlayByPointAPI(cookies=cookies, club_slug=slug) as api:
+            api._user_id = pbp_user_id
+
+            # Get available packages for this lesson.
+            lesson_data = await api._get_json(f"/api/public/clinics/{req.clinic_id}")
+            clinic = (lesson_data or {}).get("clinic", {})
+
+            # Find the best package — prefer non-member single session.
+            packages = (lesson_data or {}).get("packages") or []
+            prices = (lesson_data or {}).get("prices") or []
+            all_packages = prices + packages
+            single = [p for p in all_packages if p.get("lessons") == 1 and not p.get("hidden") and p.get("available_for_players")]
+            if not single:
+                single = [p for p in all_packages if not p.get("hidden") and p.get("available_for_players")]
+
+            package_id = req.package_id or (single[0]["id"] if single else None)
+            if not package_id:
+                raise HTTPException(status_code=400, detail="No available booking package found for this session.")
+
+            # POST booking.
+            booking_resp = await api._post_json(
+                f"/api/public/clinics/{req.clinic_id}/enroll",
+                data={
+                    "clinic_lesson_id": req.lesson_id,
+                    "package_id": package_id,
+                    "user_id": pbp_user_id,
+                    "payment_type": "card",
+                },
+            )
+
+            return {
+                "success": True,
+                "message": "Booking confirmed!",
+                "booking": booking_resp,
+            }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Booking failed: {e}")
+
+
 # ── Entry point ──────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":

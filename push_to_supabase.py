@@ -384,10 +384,100 @@ def push_to_supabase(sb, records: list[dict]) -> None:
     asyncio.get_event_loop().run_until_complete(supabase_upsert(records))
 
 
+async def refresh_user_sessions() -> None:
+    """
+    Read all connected users from pbp_credentials, log in for each,
+    and store their fresh PBP session cookies back to Supabase.
+    Uses a service-role key to bypass RLS — falls back to anon key
+    (will only work if RLS allows it, or if using service key).
+    """
+    console.print("Refreshing user PBP sessions…")
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+        "Prefer": "resolution=merge-duplicates",
+    }
+
+    # Read all connected credentials.
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        resp = await client.get(
+            f"{SUPABASE_URL}/rest/v1/pbp_credentials?is_connected=eq.true&select=user_id,pbp_email,pbp_password_encrypted",
+            headers=headers,
+        )
+        if resp.status_code != 200:
+            console.print(f"  [yellow]Could not read pbp_credentials: {resp.status_code}[/yellow]")
+            return
+        users = resp.json()
+
+    if not users:
+        console.print("  [dim]No connected users found[/dim]")
+        return
+
+    console.print(f"  Found {len(users)} connected user(s)")
+
+    for u in users:
+        user_id = u.get("user_id")
+        email = u.get("pbp_email", "")
+        encoded_pw = u.get("pbp_password_encrypted", "")
+        if not email or not encoded_pw:
+            continue
+
+        try:
+            import base64
+            password = base64.b64decode(encoded_pw).decode("utf-8")
+        except Exception:
+            console.print(f"  [yellow]Could not decode password for {email}[/yellow]")
+            continue
+
+        console.print(f"  Logging in for {email}…")
+        try:
+            # Use the existing PBP login flow from extract_thejar.
+            from extract_thejar import _login_playwright
+            cookies, pbp_uid, _ = await _login_playwright(email, password)
+            if not cookies:
+                console.print(f"  [red]Login failed for {email}[/red]")
+                # Mark as disconnected.
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    await client.patch(
+                        f"{SUPABASE_URL}/rest/v1/pbp_credentials?user_id=eq.{user_id}",
+                        json={"is_connected": False, "updated_at": datetime.utcnow().isoformat()},
+                        headers=headers,
+                    )
+                continue
+
+            # Store fresh cookies back to Supabase.
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                r = await client.patch(
+                    f"{SUPABASE_URL}/rest/v1/pbp_credentials?user_id=eq.{user_id}",
+                    json={
+                        "pbp_cookies": cookies,
+                        "pbp_user_id": pbp_uid,
+                        "is_connected": True,
+                        "session_valid_until": (datetime.utcnow() + timedelta(days=7)).isoformat(),
+                        "last_synced_at": datetime.utcnow().isoformat(),
+                        "updated_at": datetime.utcnow().isoformat(),
+                    },
+                    headers=headers,
+                )
+                if r.status_code in (200, 204):
+                    console.print(f"  [green]✓[/green] Session refreshed for {email} (PBP ID: {pbp_uid})")
+                else:
+                    console.print(f"  [yellow]Could not save session for {email}: {r.status_code}[/yellow]")
+
+        except Exception as e:
+            console.print(f"  [red]Error refreshing session for {email}: {e}[/red]")
+
+    console.print()
+
+
 async def run_once():
     console.print(f"\n[bold]🏓 PickleMatch → Supabase sync[/bold] · {datetime.now().strftime('%H:%M:%S')}\n")
 
     dates = [date.today() + timedelta(days=i) for i in range(DAYS_AHEAD)]
+
+    # ── Refresh user PBP sessions ────────────────────────────────────────────
+    await refresh_user_sessions()
 
     # ── PlayByPoint ─────────────────────────────────────────────────────────
     cookies, user_id, email = _load_cached_session()
