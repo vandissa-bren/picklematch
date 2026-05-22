@@ -820,6 +820,74 @@ async def _fetch_sportlogic(target_date: date, from_sec: int, to_sec: int) -> li
 
 # ── PBP Booking ───────────────────────────────────────────────────────────────
 
+class ValidateCredentialsRequest(BaseModel):
+    email: str
+    password: str
+
+
+@app.post("/api/pbp/validate")
+async def pbp_validate(req: ValidateCredentialsRequest):
+    """
+    Validate PBP credentials by attempting to fetch the user profile.
+    Returns user_id and email on success, raises 401 on failure.
+    This endpoint is called when a user connects their PBP account.
+    """
+    try:
+        import base64
+        # Try logging in via the API using email/password.
+        # PBP uses a Rails session login — we POST to /users/sign_in.
+        login_url = "https://app.playbypoint.com/users/sign_in"
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "X-Requested-With": "XMLHttpRequest",
+        }
+        payload = {
+            "user": {
+                "email": req.email,
+                "password": req.password,
+            }
+        }
+        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+            resp = await client.post(login_url, json=payload, headers=headers)
+
+            if resp.status_code in (200, 201):
+                data = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
+                user_id = data.get("id") or data.get("user_id")
+                cookies = dict(resp.cookies)
+                if cookies or user_id:
+                    return {
+                        "valid": True,
+                        "user_id": user_id,
+                        "email": req.email,
+                        "cookies": cookies,
+                    }
+
+            # Try alternate endpoint.
+            resp2 = await client.post(
+                "https://app.playbypoint.com/api/users/sign_in",
+                json=payload,
+                headers=headers,
+            )
+            if resp2.status_code in (200, 201):
+                data2 = resp2.json() if resp2.headers.get("content-type", "").startswith("application/json") else {}
+                user_id = data2.get("id") or data2.get("user_id")
+                cookies = dict(resp2.cookies)
+                return {
+                    "valid": True,
+                    "user_id": user_id,
+                    "email": req.email,
+                    "cookies": cookies,
+                }
+
+            raise HTTPException(status_code=401, detail="Invalid email or password. Please check your PlayByPoint credentials.")
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Could not verify credentials: {e}")
+
+
 class BookingRequest(BaseModel):
     user_id: str
     lesson_id: int
