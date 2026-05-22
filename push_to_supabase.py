@@ -327,7 +327,6 @@ async def scrape_pbp_venue(
                             "skill_level": skill_level,
                             "roster": roster,
                             "lesson_id": lesson_id,
-                            "clinic_id": stub.get("id"),
                         })
             except Exception as e:
                 console.print(f"    [yellow]sessions error for {name}: {e}[/yellow]")
@@ -385,7 +384,50 @@ def push_to_supabase(sb, records: list[dict]) -> None:
     asyncio.get_event_loop().run_until_complete(supabase_upsert(records))
 
 
-async def refresh_user_sessions() -> None:
+async def _pbp_login_for_user(email: str, password: str) -> tuple[dict, int, str]:
+    """
+    Log in to PlayByPoint as a specific user by temporarily setting env vars
+    and running the scraper's login flow via Playwright.
+    Returns (cookies, user_id, email) or ({}, 0, '') on failure.
+    """
+    import os as _os
+    # Temporarily override env vars for this login.
+    old_email = _os.environ.get("PBP_EMAIL", "")
+    old_password = _os.environ.get("PBP_PASSWORD", "")
+    _os.environ["PBP_EMAIL"] = email
+    _os.environ["PBP_PASSWORD"] = password
+
+    # Clear the cached session so the scraper re-authenticates.
+    from extract_thejar import USER_DATA_DIR
+    cookie_cache = USER_DATA_DIR / "cookies.json"
+    cache_backup = None
+    if cookie_cache.exists():
+        cache_backup = cookie_cache.read_bytes()
+        cookie_cache.unlink()
+
+    try:
+        from extract_thejar import PlayByPointScraper
+        import tempfile
+        # Run a minimal scrape just to trigger login and cache cookies.
+        scraper = PlayByPointScraper(
+            facility_id=597,
+            slug="nplpickleball",
+            days=1,
+            mode="fast",
+        )
+        # Run login only — don't need to scrape anything.
+        await scraper._ensure_authenticated()
+        cookies, user_id, auth_email = _load_cached_session()
+        return cookies, user_id or 0, auth_email or email
+    except Exception as e:
+        console.print(f"    [red]Login failed for {email}: {e}[/red]")
+        return {}, 0, ""
+    finally:
+        # Restore original env vars and cookie cache.
+        _os.environ["PBP_EMAIL"] = old_email
+        _os.environ["PBP_PASSWORD"] = old_password
+        if cache_backup and cookie_cache.parent.exists():
+            cookie_cache.write_bytes(cache_backup)
     """
     Read all connected users from pbp_credentials, log in for each,
     and store their fresh PBP session cookies back to Supabase.
@@ -403,7 +445,7 @@ async def refresh_user_sessions() -> None:
     # Read all connected credentials.
     async with httpx.AsyncClient(timeout=15.0) as client:
         resp = await client.get(
-            f"{SUPABASE_URL}/rest/v1/pbp_credentials?is_connected=eq.true&select=user_id,pbp_email,pbp_password_encrypted",
+            f"{SUPABASE_URL}/rest/v1/pbp_credentials?select=user_id,pbp_email,pbp_password_encrypted",
             headers=headers,
         )
         if resp.status_code != 200:
@@ -433,9 +475,7 @@ async def refresh_user_sessions() -> None:
 
         console.print(f"  Logging in for {email}…")
         try:
-            # Use the existing PBP login flow from extract_thejar.
-            from extract_thejar import _login_playwright
-            cookies, pbp_uid, _ = await _login_playwright(email, password)
+            cookies, pbp_uid, _ = await _pbp_login_for_user(email, password)
             if not cookies:
                 console.print(f"  [red]Login failed for {email}[/red]")
                 # Mark as disconnected.
