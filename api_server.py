@@ -888,7 +888,111 @@ async def pbp_validate(req: ValidateCredentialsRequest):
         raise HTTPException(status_code=500, detail=f"Could not verify credentials: {e}")
 
 
-class BookingRequest(BaseModel):
+class CourtBookingRequest(BaseModel):
+    user_id: str
+    facility_id: int
+    date: str           # YYYY-MM-DD
+    start_time: str     # HH:MM
+    end_time: str       # HH:MM
+    court_name: str     # e.g. "Court 1"
+    payment_method: str = "card"
+
+
+def _hhmm_to_sec(hhmm: str) -> int:
+    """Convert HH:MM to seconds from midnight."""
+    h, m = map(int, hhmm.split(':'))
+    return h * 3600 + m * 60
+
+
+@app.post("/api/pbp/book_court")
+async def pbp_book_court(req: CourtBookingRequest):
+    """
+    Book a court hire slot on PBP using stored user session cookies.
+    """
+    # Fetch user's stored PBP cookies from Supabase.
+    try:
+        headers = {
+            "apikey": SUPABASE_KEY,
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+        }
+        url = f"{SUPABASE_URL}/rest/v1/pbp_credentials?user_id=eq.{req.user_id}&select=pbp_cookies,pbp_user_id,is_connected"
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(url, headers=headers)
+            rows = resp.json() if resp.status_code == 200 else []
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Could not fetch credentials: {e}")
+
+    if not rows:
+        raise HTTPException(status_code=401, detail="PBP account not connected. Please connect in Profile settings.")
+
+    row = rows[0]
+    cookies = row.get("pbp_cookies")
+    pbp_user_id = row.get("pbp_user_id")
+    if not cookies or not pbp_user_id:
+        raise HTTPException(status_code=401, detail="PBP session expired. Please reconnect in Profile settings.")
+
+    try:
+        from datetime import date as date_type
+        slug = PBP_SLUG_MAP.get(req.facility_id, "")
+        target_date = datetime.strptime(req.date, "%Y-%m-%d").date()
+        start_sec = _hhmm_to_sec(req.start_time)
+        end_sec = _hhmm_to_sec(req.end_time)
+
+        async with PlayByPointAPI(cookies=cookies, club_slug=slug) as api:
+            api._user_id = pbp_user_id
+
+            # Get surface type.
+            surface = "pickleball"
+            try:
+                ct = await api.court_types(req.facility_id)
+                ps = [s for s in (ct or []) if "pickle" in (s.get("surface") or "").lower()]
+                if ps:
+                    surface = ps[0]["surface"]
+            except Exception:
+                pass
+
+            # Get available courts to find the court_id for the requested court name.
+            courts = await api.available_courts(
+                req.facility_id, target_date,
+                start_sec, start_sec + 1800,
+                surface=surface,
+            )
+            court_id = None
+            for c in (courts or []):
+                if c.get("name", "").lower() == req.court_name.lower():
+                    court_id = c.get("id")
+                    break
+
+            if not court_id:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Court '{req.court_name}' not found or no longer available."
+                )
+
+            # Make the real booking.
+            result = await api.book_court(
+                court_id=court_id,
+                day=target_date,
+                start_seconds=start_sec,
+                end_seconds=end_sec,
+                user_id=pbp_user_id,
+                payment_method=req.payment_method,
+                dry_run=False,
+            )
+
+            return {
+                "success": True,
+                "message": "Court booked!",
+                "booking": result,
+            }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Booking failed: {e}")
+
+
+
     user_id: str
     lesson_id: int
     clinic_id: int
