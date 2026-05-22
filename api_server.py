@@ -929,7 +929,7 @@ async def pbp_book_court(req: CourtBookingRequest):
     cookies = row.get("pbp_cookies")
     pbp_user_id = row.get("pbp_user_id")
     if not cookies or not pbp_user_id:
-        raise HTTPException(status_code=401, detail="PBP session expired. Please reconnect in Profile settings.")
+        raise HTTPException(status_code=401, detail="PBP session not yet active. Please run the sync script or wait a few minutes.")
 
     try:
         from datetime import date as date_type
@@ -1023,13 +1023,10 @@ async def pbp_book(req: BookingRequest):
         raise HTTPException(status_code=401, detail="PBP account not connected. Please connect your account in Profile settings.")
 
     row = rows[0]
-    if not row.get("is_connected"):
-        raise HTTPException(status_code=401, detail="PBP account disconnected. Please reconnect in Profile settings.")
-
     cookies = row.get("pbp_cookies")
     pbp_user_id = row.get("pbp_user_id")
     if not cookies or not pbp_user_id:
-        raise HTTPException(status_code=401, detail="PBP session expired. Please reconnect in Profile settings.")
+        raise HTTPException(status_code=401, detail="PBP session not yet active. Please run the sync script or wait a few minutes.")
 
     # Use the stored cookies to make the booking.
     try:
