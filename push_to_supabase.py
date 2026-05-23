@@ -417,7 +417,7 @@ async def refresh_user_sessions() -> None:
     # Read all connected credentials.
     async with httpx.AsyncClient(timeout=15.0) as client:
         resp = await client.get(
-            f"{SUPABASE_URL}/rest/v1/pbp_credentials?select=user_id,pbp_email,pbp_password_encrypted",
+            f"{SUPABASE_URL}/rest/v1/pbp_credentials?select=user_id,pbp_email,pbp_password_encrypted,pbp_cookies,session_valid_until",
             headers=headers,
         )
         if resp.status_code != 200:
@@ -431,12 +431,25 @@ async def refresh_user_sessions() -> None:
 
     console.print(f"  Found {len(users)} connected user(s)")
 
+    from datetime import timezone as _tz
     for u in users:
         user_id = u.get("user_id")
         email = u.get("pbp_email", "")
         encoded_pw = u.get("pbp_password_encrypted", "")
         if not email or not encoded_pw:
             continue
+
+        # Skip if cookies already exist and haven't expired.
+        existing_cookies = u.get("pbp_cookies")
+        valid_until = u.get("session_valid_until")
+        if existing_cookies and valid_until:
+            try:
+                expiry = datetime.fromisoformat(valid_until.replace("Z", "+00:00"))
+                if expiry > datetime.now(_tz.utc):
+                    console.print(f"  [dim]Skipping {email} — cookies still valid until {expiry.strftime('%Y-%m-%d')}[/dim]")
+                    continue
+            except Exception:
+                pass
 
         try:
             import base64
