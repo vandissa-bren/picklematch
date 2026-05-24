@@ -132,11 +132,53 @@ async def scrape_pbp_venue(
             except Exception:
                 pass
 
-            # Skip court availability scraping - courts are served live from Railway.
-            # Only scrape sessions (programs/clinics).
-            for target_date in dates:
+            # Scrape court availability per date.
+            for i_date, target_date in enumerate(dates):
+                if i_date > 0:
+                    await asyncio.sleep(1.5)
                 date_str = target_date.isoformat()
-                result["by_date"][date_str] = []  # empty court blocks
+                result["by_date"][date_str] = []
+                try:
+                    hours_data = await api.available_hours(facility_id, target_date, surface=surface)
+                    slots = (hours_data or {}).get("available_hours") or \
+                            (hours_data if isinstance(hours_data, list) else [])
+                    court_slots: dict = {}
+                    for s in slots:
+                        cid = s.get("court_id")
+                        cname = s.get("court_name") or s.get("name") or f"Court {cid}"
+                        if cid:
+                            court_slots.setdefault((cid, cname), []).append(s.get("hour_start", 0))
+                    for (cid, cname), hours in court_slots.items():
+                        hours_sorted = sorted(hours)
+                        run_start = run_end = None
+                        for h in hours_sorted:
+                            if run_start is None:
+                                run_start = run_end = h
+                            elif h == run_end + 1800:
+                                run_end = h
+                            else:
+                                dur = (run_end - run_start) // 60 + 30
+                                if dur >= 60:
+                                    result["by_date"][date_str].append({
+                                        "court": cname,
+                                        "court_id": cid,
+                                        "start": _sec_to_hhmm(run_start),
+                                        "end": _sec_to_hhmm(run_end + 1800),
+                                        "duration_min": dur,
+                                    })
+                                run_start = run_end = h
+                        if run_start is not None:
+                            dur = (run_end - run_start) // 60 + 30
+                            if dur >= 60:
+                                result["by_date"][date_str].append({
+                                    "court": cname,
+                                    "court_id": cid,
+                                    "start": _sec_to_hhmm(run_start),
+                                    "end": _sec_to_hhmm(run_end + 1800),
+                                    "duration_min": dur,
+                                })
+                except Exception as e:
+                    console.print(f"    [yellow]slots error for {name} {date_str}: {e}[/yellow]")
 
             # Sessions (across all dates).
             try:
@@ -478,30 +520,27 @@ async def run_once():
         await supabase_upsert(records)
         console.print(f"[green]✓ Pushed {len(records)} PBP venues to Supabase[/green]\n")
 
-        # Cache court IDs so Railway can look them up without calling PBP live.
+        # Cache court IDs from already-scraped data — no extra API calls needed.
         console.print("Caching court IDs…")
         court_id_records = []
-        today = date.today()
-        start_sec = 18 * 3600  # 6pm — likely to have courts available
-        end_sec = 19 * 3600
-        async with PlayByPointAPI(cookies=cookies, club_slug="nplpickleball") as api:
-            api._user_id = user_id
-            for fid, slug in PBP_SLUG_MAP.items():
-                try:
-                    courts = await api.available_courts(fid, today, start_sec, end_sec)
-                    for c in (courts or []):
-                        cid = c.get("id")
-                        cname = c.get("name", "")
-                        if cid and cname:
-                            court_id_records.append({
-                                "facility_id": fid,
-                                "court_name": cname,
-                                "court_id": cid,
-                                "updated_at": datetime.utcnow().isoformat(),
-                            })
-                    await asyncio.sleep(1)
-                except Exception as e:
-                    console.print(f"  [yellow]court IDs error for {fid}: {e}[/yellow]")
+        seen_courts = set()
+        for r in pbp_results:
+            if not isinstance(r, dict):
+                continue
+            fid = r["id"]
+            for date_str, blocks in r.get("by_date", {}).items():
+                for b in blocks:
+                    cid = b.get("court_id")
+                    cname = b.get("court")
+                    key = (fid, cname)
+                    if cid and cname and key not in seen_courts:
+                        seen_courts.add(key)
+                        court_id_records.append({
+                            "facility_id": fid,
+                            "court_name": cname,
+                            "court_id": cid,
+                            "updated_at": datetime.utcnow().isoformat(),
+                        })
 
         if court_id_records:
             async with httpx.AsyncClient(timeout=30.0) as client:
