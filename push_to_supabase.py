@@ -132,68 +132,11 @@ async def scrape_pbp_venue(
             except Exception:
                 pass
 
-            # Scrape each date.
+            # Skip court availability scraping - courts are served live from Railway.
+            # Only scrape sessions (programs/clinics).
             for target_date in dates:
                 date_str = target_date.isoformat()
-                court_blocks = []
-                try:
-                    hours_data = await api.available_hours(facility_id, target_date, surface=surface)
-                    all_slots = (hours_data or {}).get("available_hours") or [] \
-                        if isinstance(hours_data, dict) else (hours_data or [])
-
-                    court_slots: dict[str, list[int]] = {}
-                    for slot in all_slots:
-                        if not isinstance(slot, dict) or not slot.get("available"):
-                            continue
-                        sec = slot.get("seconds_from_midnight")
-                        if not isinstance(sec, (int, float)):
-                            continue
-                        try:
-                            courts = await api.available_courts(
-                                facility_id, target_date,
-                                int(sec), int(sec) + 1800, surface=surface,
-                            )
-                            for court in (courts or []):
-                                cid = court.get("id") or court.get("name") or "?"
-                                cname = court.get("name") or str(cid)
-                                key = f"{cid}|{cname}"
-                                court_slots.setdefault(key, []).append(int(sec))
-                        except Exception:
-                            pass
-
-                    for court_key, secs in court_slots.items():
-                        cname = court_key.split("|", 1)[1]
-                        secs_sorted = sorted(set(secs))
-                        run_start = run_end = None
-                        for s in secs_sorted:
-                            if run_start is None:
-                                run_start = run_end = s
-                            elif s == run_end + 1800:
-                                run_end = s
-                            else:
-                                dur = (run_end - run_start) // 60 + 30
-                                if dur >= 60:
-                                    court_blocks.append({
-                                        "court": cname,
-                                        "start": _sec_to_hhmm(run_start),
-                                        "end": _sec_to_hhmm(run_end + 1800),
-                                        "duration_min": dur,
-                                    })
-                                run_start = run_end = s
-                        if run_start is not None:
-                            dur = (run_end - run_start) // 60 + 30
-                            if dur >= 60:
-                                court_blocks.append({
-                                    "court": cname,
-                                    "start": _sec_to_hhmm(run_start),
-                                    "end": _sec_to_hhmm(run_end + 1800),
-                                    "duration_min": dur,
-                                })
-
-                except Exception as e:
-                    console.print(f"    [yellow]slots error for {name} {date_str}: {e}[/yellow]")
-
-                result["by_date"][date_str] = sorted(court_blocks, key=lambda x: (x["start"], x["court"]))
+                result["by_date"][date_str] = []  # empty court blocks
 
             # Sessions (across all dates).
             try:
@@ -513,15 +456,14 @@ async def run_once():
         console.print(f"[dim]PBP session: {email}[/dim]")
         console.print(f"Scraping {len(PBP_SLUG_MAP)} PBP venues × {DAYS_AHEAD} days…")
 
-        tasks = [
-            scrape_pbp_venue(cookies, user_id, fid, VENUE_NAMES.get(fid, f"Venue {fid}"), slug, dates)
-            for fid, slug in PBP_SLUG_MAP.items()
-        ]
-        pbp_results = await asyncio.gather(*tasks, return_exceptions=True)
+        pbp_results = []
+        for fid, slug in PBP_SLUG_MAP.items():
+            result = await scrape_pbp_venue(cookies, user_id, fid, VENUE_NAMES.get(fid, f"Venue {fid}"), slug, dates)
+            pbp_results.append(result)
 
         records = []
         for r in pbp_results:
-            if isinstance(r, Exception):
+            if not isinstance(r, dict):
                 continue
             records.append({
                 "id": f"pbp-{r['id']}",
@@ -535,6 +477,47 @@ async def run_once():
 
         await supabase_upsert(records)
         console.print(f"[green]✓ Pushed {len(records)} PBP venues to Supabase[/green]\n")
+
+        # Cache court IDs so Railway can look them up without calling PBP live.
+        console.print("Caching court IDs…")
+        court_id_records = []
+        today = date.today()
+        start_sec = 18 * 3600  # 6pm — likely to have courts available
+        end_sec = 19 * 3600
+        async with PlayByPointAPI(cookies=cookies, club_slug="nplpickleball") as api:
+            api._user_id = user_id
+            for fid, slug in PBP_SLUG_MAP.items():
+                try:
+                    courts = await api.available_courts(fid, today, start_sec, end_sec)
+                    for c in (courts or []):
+                        cid = c.get("id")
+                        cname = c.get("name", "")
+                        if cid and cname:
+                            court_id_records.append({
+                                "facility_id": fid,
+                                "court_name": cname,
+                                "court_id": cid,
+                                "updated_at": datetime.utcnow().isoformat(),
+                            })
+                    await asyncio.sleep(1)
+                except Exception as e:
+                    console.print(f"  [yellow]court IDs error for {fid}: {e}[/yellow]")
+
+        if court_id_records:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                r = await client.post(
+                    f"{SUPABASE_URL}/rest/v1/court_ids",
+                    headers={
+                        "apikey": SUPABASE_KEY,
+                        "Authorization": f"Bearer {SUPABASE_KEY}",
+                        "Content-Type": "application/json",
+                        "Prefer": "resolution=merge-duplicates",
+                    },
+                    json=court_id_records,
+                )
+            console.print(f"[green]✓ Cached {len(court_id_records)} court IDs[/green]\n")
+        else:
+            console.print("[yellow]No court IDs cached[/yellow]\n")
 
     # ── OpenSports ───────────────────────────────────────────────────────────
     console.print("Scraping OpenSports…")

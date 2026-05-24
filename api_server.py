@@ -938,36 +938,31 @@ async def pbp_book_court(req: CourtBookingRequest):
         start_sec = _hhmm_to_sec(req.start_time)
         end_sec = _hhmm_to_sec(req.end_time)
 
+        # Look up court_id from Supabase cache (avoids live PBP call blocked by Cloudflare).
+        court_id = None
+        try:
+            import urllib.parse
+            court_name_enc = urllib.parse.quote(req.court_name)
+            lookup_url = f"{SUPABASE_URL}/rest/v1/court_ids?facility_id=eq.{req.facility_id}&court_name=eq.{court_name_enc}&select=court_id&limit=1"
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                cr = await client.get(lookup_url, headers={
+                    "apikey": SUPABASE_KEY,
+                    "Authorization": f"Bearer {SUPABASE_KEY}",
+                })
+                rows = cr.json() if cr.status_code == 200 else []
+                if rows:
+                    court_id = rows[0].get("court_id")
+        except Exception:
+            pass
+
+        if not court_id:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Court '{req.court_name}' not found. Please run push_to_supabase.py to refresh court IDs."
+            )
+
         async with PlayByPointAPI(cookies=cookies, club_slug=slug) as api:
             api._user_id = pbp_user_id
-
-            # Get surface type.
-            surface = "pickleball"
-            try:
-                ct = await api.court_types(req.facility_id)
-                ps = [s for s in (ct or []) if "pickle" in (s.get("surface") or "").lower()]
-                if ps:
-                    surface = ps[0]["surface"]
-            except Exception:
-                pass
-
-            # Get available courts to find the court_id for the requested court name.
-            courts = await api.available_courts(
-                req.facility_id, target_date,
-                start_sec, start_sec + 1800,
-                surface=surface,
-            )
-            court_id = None
-            for c in (courts or []):
-                if c.get("name", "").lower() == req.court_name.lower():
-                    court_id = c.get("id")
-                    break
-
-            if not court_id:
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"Court '{req.court_name}' not found or no longer available."
-                )
 
             # Make the real booking.
             result = await api.book_court(
