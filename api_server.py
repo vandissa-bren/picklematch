@@ -964,7 +964,32 @@ async def pbp_book_court(req: CourtBookingRequest):
         async with PlayByPointAPI(cookies=cookies, club_slug=slug) as api:
             api._user_id = pbp_user_id
 
-            # Make the real booking.
+            # Look up cached CSRF token from Supabase (Railway can't fetch it live).
+            csrf_token = None
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    cr = await client.get(
+                        f"{SUPABASE_URL}/rest/v1/csrf_tokens?slug=eq.{slug}&select=token&limit=1",
+                        headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"},
+                    )
+                    rows = cr.json() if cr.status_code == 200 else []
+                    if rows:
+                        csrf_token = rows[0].get("token")
+            except Exception:
+                pass
+
+            if not csrf_token:
+                raise HTTPException(
+                    status_code=503,
+                    detail="CSRF token not cached. Please run push_to_supabase.py to refresh."
+                )
+
+            # Monkey-patch _get_csrf_token to return cached token without hitting PBP.
+            async def _cached_csrf(*args, **kwargs):
+                return csrf_token
+            api._get_csrf_token = _cached_csrf
+
+            # Make the real booking using the cached CSRF token.
             result = await api.book_court(
                 court_id=court_id,
                 day=target_date,
