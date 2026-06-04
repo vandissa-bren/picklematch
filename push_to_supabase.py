@@ -81,14 +81,30 @@ def _sec_to_hhmm(sec: int) -> str:
 
 
 def _load_cookies() -> tuple[dict, int]:
-    """Load PBP cookies from env var."""
+    """Load PBP cookies from env var or local cache file."""
+    # Try env var first
     raw = os.environ.get("PBP_COOKIES_JSON", "")
     if raw:
         try:
             data = json.loads(raw)
-            return data.get("cookies", {}), data.get("user_id", 0)
+            cookies = data.get("cookies", {})
+            if cookies:
+                return cookies, data.get("user_id", 0)
         except Exception:
             pass
+    # Try local cache file written by refresh_cookies.py
+    for cache_path in [
+        Path(__file__).parent / ".pbp_cookies.json",
+        Path.home() / ".pbp_cookies.json",
+    ]:
+        if cache_path.exists():
+            try:
+                data = json.loads(cache_path.read_text())
+                cookies = data.get("cookies", {})
+                if cookies:
+                    return cookies, data.get("user_id", 0)
+            except Exception:
+                pass
     return {}, 0
 
 
