@@ -498,13 +498,23 @@ async def run_once():
 
     dates = [date.today() + timedelta(days=i) for i in range(DAYS_AHEAD)]
 
-    # ── Refresh user PBP sessions ────────────────────────────────────────────
-    await refresh_user_sessions()
-
     # ── PlayByPoint ─────────────────────────────────────────────────────────
-    cookies, user_id, email = _load_cached_session()
+    # Try env var first (server deployment), fall back to local cache file.
+    import os as _os, json as _json
+    cookies, user_id, email = {}, 0, ""
+    _raw = _os.environ.get("PBP_COOKIES_JSON", "")
+    if _raw:
+        try:
+            _d = _json.loads(_raw)
+            cookies = _d.get("cookies", {})
+            user_id = _d.get("user_id", 0)
+            email = _d.get("email", "")
+        except Exception:
+            pass
     if not cookies:
-        console.print("[red]No PBP session. Run the scraper first.[/red]")
+        cookies, user_id, email = _load_cached_session()
+    if not cookies:
+        console.print("[red]No PBP session. Set PBP_COOKIES_JSON or run the scraper first.[/red]")
     else:
         console.print(f"[dim]PBP session: {email}[/dim]")
         console.print(f"Scraping {len(PBP_SLUG_MAP)} PBP venues × {DAYS_AHEAD} days…")
