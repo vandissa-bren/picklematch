@@ -427,109 +427,103 @@ async def run_once():
 
     dates = [date.today() + timedelta(days=i) for i in range(DAYS_AHEAD)]
 
-    # ── Refresh user PBP sessions ────────────────────────────────────────────
-    await refresh_user_sessions()
-
     # ── PlayByPoint ─────────────────────────────────────────────────────────
-    cookies, user_id, email = _load_cached_session()
-    if not cookies:
-        console.print("[red]No PBP session. Run the scraper first.[/red]")
-    else:
-        console.print(f"[dim]PBP session: {email}[/dim]")
-        console.print(f"Scraping {len(PBP_SLUG_MAP)} PBP venues × {DAYS_AHEAD} days…")
+    # Public endpoints don't need cookies — proxy provides residential IP.
+    cookies, user_id = {}, 0
+    console.print(f"Scraping {len(PBP_SLUG_MAP)} PBP venues × {DAYS_AHEAD} days…")
 
-        pbp_results = []
+    pbp_results = []
+    for fid, slug in PBP_SLUG_MAP.items():
+        result = await scrape_pbp_venue(cookies, user_id, fid, VENUE_NAMES.get(fid, f"Venue {fid}"), slug, dates)
+        pbp_results.append(result)
+
+    records = []
+    for r in pbp_results:
+        if not isinstance(r, dict):
+            continue
+        records.append({
+            "id": f"pbp-{r['id']}",
+            "venue_name": VENUE_NAMES.get(r["id"], r["name"]),
+            "platform": "playbypoint",
+            "date": date.today().isoformat(),
+            "data": r,
+            "updated_at": datetime.utcnow().isoformat(),
+        })
+        console.print(f"  [green]✓[/green] {r['name']} · {sum(len(v) for v in r['by_date'].values())} blocks · {len(r['sessions'])} sessions")
+
+    await supabase_upsert(records)
+    console.print(f"[green]✓ Pushed {len(records)} PBP venues to Supabase[/green]\n")
+
+    # Cache CSRF tokens per venue slug so Railway can book courts.
+    console.print("Caching CSRF tokens…")
+    csrf_records = []
+    async with PlayByPointAPI(cookies=cookies, club_slug="nplpickleball", proxy=PROXY_URL) as api:
+        api._user_id = user_id
         for fid, slug in PBP_SLUG_MAP.items():
-            result = await scrape_pbp_venue(cookies, user_id, fid, VENUE_NAMES.get(fid, f"Venue {fid}"), slug, dates)
-            pbp_results.append(result)
+            try:
+                api.club_slug = slug
+                token = await api._get_csrf_token()
+                if token:
+                    csrf_records.append({
+                        "slug": slug,
+                        "token": token,
+                        "updated_at": datetime.utcnow().isoformat(),
+                    })
+                await asyncio.sleep(1)
+            except Exception as e:
+                console.print(f"  [yellow]CSRF error for {slug}: {e}[/yellow]")
 
-        records = []
-        for r in pbp_results:
-            if not isinstance(r, dict):
-                continue
-            records.append({
-                "id": f"pbp-{r['id']}",
-                "venue_name": VENUE_NAMES.get(r["id"], r["name"]),
-                "platform": "playbypoint",
-                "date": date.today().isoformat(),
-                "data": r,
-                "updated_at": datetime.utcnow().isoformat(),
-            })
-            console.print(f"  [green]✓[/green] {r['name']} · {sum(len(v) for v in r['by_date'].values())} blocks · {len(r['sessions'])} sessions")
+    if csrf_records:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            r = await client.post(
+                f"{SUPABASE_URL}/rest/v1/csrf_tokens",
+                headers={
+                    "apikey": SUPABASE_KEY,
+                    "Authorization": f"Bearer {SUPABASE_KEY}",
+                    "Content-Type": "application/json",
+                    "Prefer": "resolution=merge-duplicates",
+                },
+                json=csrf_records,
+            )
+        console.print(f"[green]✓ Cached {len(csrf_records)} CSRF tokens[/green]\n")
+    else:
+        console.print("[yellow]No CSRF tokens cached[/yellow]\n")
+    console.print("Caching court IDs…")
+    court_id_records = []
+    seen_courts = set()
+    for r in pbp_results:
+        if not isinstance(r, dict):
+            continue
+        fid = r["id"]
+        for date_str, blocks in r.get("by_date", {}).items():
+            for b in blocks:
+                cid = b.get("court_id")
+                cname = b.get("court")
+                key = (fid, cname)
+                if cid and cname and key not in seen_courts:
+                    seen_courts.add(key)
+                    court_id_records.append({
+                        "facility_id": fid,
+                        "court_name": cname,
+                        "court_id": cid,
+                        "updated_at": datetime.utcnow().isoformat(),
+                    })
 
-        await supabase_upsert(records)
-        console.print(f"[green]✓ Pushed {len(records)} PBP venues to Supabase[/green]\n")
-
-        # Cache CSRF tokens per venue slug so Railway can book courts.
-        console.print("Caching CSRF tokens…")
-        csrf_records = []
-        async with PlayByPointAPI(cookies=cookies, club_slug="nplpickleball", proxy=PROXY_URL) as api:
-            api._user_id = user_id
-            for fid, slug in PBP_SLUG_MAP.items():
-                try:
-                    api.club_slug = slug
-                    token = await api._get_csrf_token()
-                    if token:
-                        csrf_records.append({
-                            "slug": slug,
-                            "token": token,
-                            "updated_at": datetime.utcnow().isoformat(),
-                        })
-                    await asyncio.sleep(1)
-                except Exception as e:
-                    console.print(f"  [yellow]CSRF error for {slug}: {e}[/yellow]")
-
-        if csrf_records:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                r = await client.post(
-                    f"{SUPABASE_URL}/rest/v1/csrf_tokens",
-                    headers={
-                        "apikey": SUPABASE_KEY,
-                        "Authorization": f"Bearer {SUPABASE_KEY}",
-                        "Content-Type": "application/json",
-                        "Prefer": "resolution=merge-duplicates",
-                    },
-                    json=csrf_records,
-                )
-            console.print(f"[green]✓ Cached {len(csrf_records)} CSRF tokens[/green]\n")
-        else:
-            console.print("[yellow]No CSRF tokens cached[/yellow]\n")
-        console.print("Caching court IDs…")
-        court_id_records = []
-        seen_courts = set()
-        for r in pbp_results:
-            if not isinstance(r, dict):
-                continue
-            fid = r["id"]
-            for date_str, blocks in r.get("by_date", {}).items():
-                for b in blocks:
-                    cid = b.get("court_id")
-                    cname = b.get("court")
-                    key = (fid, cname)
-                    if cid and cname and key not in seen_courts:
-                        seen_courts.add(key)
-                        court_id_records.append({
-                            "facility_id": fid,
-                            "court_name": cname,
-                            "court_id": cid,
-                            "updated_at": datetime.utcnow().isoformat(),
-                        })
-
-        if court_id_records:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                r = await client.post(
-                    f"{SUPABASE_URL}/rest/v1/court_ids",
-                    headers={
-                        "apikey": SUPABASE_KEY,
-                        "Authorization": f"Bearer {SUPABASE_KEY}",
-                        "Content-Type": "application/json",
-                        "Prefer": "resolution=merge-duplicates",
-                    },
-                    json=court_id_records,
-                )
-            console.print(f"[green]✓ Cached {len(court_id_records)} court IDs[/green]\n")
-        else:
-            console.print("[yellow]No court IDs cached[/yellow]\n")
+    if court_id_records:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            r = await client.post(
+                f"{SUPABASE_URL}/rest/v1/court_ids",
+                headers={
+                    "apikey": SUPABASE_KEY,
+                    "Authorization": f"Bearer {SUPABASE_KEY}",
+                    "Content-Type": "application/json",
+                    "Prefer": "resolution=merge-duplicates",
+                },
+                json=court_id_records,
+            )
+        console.print(f"[green]✓ Cached {len(court_id_records)} court IDs[/green]\n")
+    else:
+        console.print("[yellow]No court IDs cached[/yellow]\n")
 
     # ── OpenSports ───────────────────────────────────────────────────────────
     console.print("Scraping OpenSports…")
