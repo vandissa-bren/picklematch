@@ -159,55 +159,34 @@ async def scrape_pbp_venue(
 
                 for stub in clinic_stubs:
                     program_name = stub.get("name", "Session")
-                    program_url = stub.get("url") or ""
-                    # Extract slug from url like /programs/social-open-play-a2af7d
-                    program_slug = program_url.split("/programs/")[-1] if "/programs/" in program_url else ""
-
-                    # Fetch individual session dates via React props.
-                    lessons = []
+                    clinic_id = stub.get("id")
                     program_price = ""
                     description = ""
-                    skill_level = ""
-                    if program_slug:
+                    skill_level = stub.get("ntrp_str") or ""
+
+                    # Fetch clinic detail for description, skill level, lessons.
+                    lessons = []
+                    if clinic_id:
                         try:
-                            html = await api.program_detail_html(program_slug)
-                            props = _extract_react_props_from_html(html)
-                            lessons = (props.get("sessions")
-                                       or props.get("clinic_lessons") or [])
-                            program_name = props.get("name") or props.get("clinic_name") or program_name
-
-                            # Extract price from props["prices"] (non-member shown rate)
-                            all_prices = []
-                            for price_list in (props.get("prices") or [], props.get("packages") or []):
-                                for p in price_list:
-                                    if not p.get("hidden") and p.get("available_for_players") and p.get("price"):
-                                        all_prices.append(float(p["price"]))
-                            if all_prices:
-                                program_price = f"${min(all_prices):.0f}"
-
-                            # Fetch description + skill level from clinic API.
-                            clinic_id = stub.get("id") or props.get("clinic_id")
-                            if clinic_id:
-                                try:
-                                    clinic_data = await api._get_json(f"/api/public/clinics/{clinic_id}")
-                                    clinic = (clinic_data or {}).get("clinic", {})
-                                    raw_desc = clinic.get("description") or ""
-                                    # Strip HTML tags for clean text.
-                                    import re as _re
-                                    description = _re.sub(r"<[^>]+>", " ", raw_desc).strip()
-                                    description = _re.sub(r"\s+", " ", description)[:500]
-                                    # Skill level from ntrp_str or rating range.
-                                    ntrp = stub.get("ntrp_str") or ""
-                                    min_r = clinic.get("min_rating")
-                                    max_r = clinic.get("max_rating")
-                                    if ntrp:
-                                        skill_level = ntrp
-                                    elif min_r and max_r:
-                                        skill_level = f"DUPR {min_r}–{max_r}"
-                                    elif min_r:
-                                        skill_level = f"DUPR {min_r}+"
-                                except Exception:
-                                    pass
+                            clinic_data = await api._get_json(f"/api/public/clinics/{clinic_id}")
+                            clinic = (clinic_data or {}).get("clinic", {})
+                            raw_desc = clinic.get("description") or ""
+                            import re as _re
+                            description = _re.sub(r"<[^>]+>", " ", raw_desc).strip()
+                            description = _re.sub(r"\s+", " ", description)[:500]
+                            min_r = clinic.get("min_rating")
+                            max_r = clinic.get("max_rating")
+                            if not skill_level:
+                                if min_r and max_r:
+                                    skill_level = f"{min_r} / {max_r}"
+                                elif min_r:
+                                    skill_level = f"{min_r}+"
+                            lessons = clinic.get("clinic_lessons") or clinic.get("sessions") or []
+                            # Price from packages
+                            for pkg in (clinic.get("packages") or []):
+                                if not pkg.get("hidden") and pkg.get("price"):
+                                    program_price = f"${float(pkg['price']):.0f}"
+                                    break
                         except Exception:
                             pass
 
