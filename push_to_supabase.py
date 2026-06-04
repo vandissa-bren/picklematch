@@ -1,7 +1,7 @@
 """
 push_to_supabase.py — Scrape PBP/OpenSports/SportLogic and push to Supabase cache.
 Runs on the DO server every hour via cron.
-Requires PBP_COOKIES_JSON env var (pushed via refresh_cookies.py from Windows machine).
+Requires .pbp_cookies.json (uploaded by refresh_cookies.py from Windows machine).
 """
 
 from __future__ import annotations
@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import sys
 import argparse
 from datetime import date, datetime, timedelta
@@ -24,7 +25,7 @@ except ImportError:
     pass
 
 sys.path.insert(0, str(Path(__file__).parent))
-from extract_thejar import PlayByPointAPI
+from extract_thejar import PlayByPointAPI, _extract_react_props_from_html
 from extract_opensports import OpenSportsAPI, parse_session
 from extract_sportlogic import SportLogicClient, VENUES as SL_VENUES
 
@@ -82,7 +83,6 @@ def _sec_to_hhmm(sec: int) -> str:
 
 def _load_cookies() -> tuple[dict, int]:
     """Load PBP cookies from env var or local cache file."""
-    # Try env var first
     raw = os.environ.get("PBP_COOKIES_JSON", "")
     if raw:
         try:
@@ -92,7 +92,6 @@ def _load_cookies() -> tuple[dict, int]:
                 return cookies, data.get("user_id", 0)
         except Exception:
             pass
-    # Try local cache file written by refresh_cookies.py
     for cache_path in [
         Path(__file__).parent / ".pbp_cookies.json",
         Path.home() / ".pbp_cookies.json",
@@ -163,36 +162,42 @@ async def scrape_pbp_venue(
 
             for stub in stubs:
                 clinic_id = stub.get("id")
-                if not clinic_id:
+                program_url = stub.get("url") or ""
+                program_slug = program_url.split("/programs/")[-1] if "/programs/" in program_url else ""
+                if not clinic_id or not program_slug:
                     continue
+
+                # Skip clinics with no upcoming sessions in our date range
+                week_days = stub.get("future_week_days") or []
+                has_upcoming = any(((d.weekday() + 1) % 7) in week_days for d in dates)
+                if not has_upcoming:
+                    continue
+
                 try:
-                    # Fetch clinic detail for lesson times, prices, rosters
-                    cd = await api._get_json(f"/api/public/clinics/{clinic_id}")
-                    clinic = (cd or {}).get("clinic", {})
+                    # Fetch HTML page — only source for lesson dates/times
+                    html = await api.program_detail_html(program_slug)
+                    props = _extract_react_props_from_html(html)
+                    lessons_raw = props.get("sessions") or props.get("clinic_lessons") or []
 
-                    # Description
-                    import re as _re
-                    desc = _re.sub(r"<[^>]+>", " ", clinic.get("description") or "").strip()[:500]
-                    desc = _re.sub(r"\s+", " ", desc)
-
-                    # Skill level
+                    # Metadata
+                    raw_desc = props.get("description") or ""
+                    desc = re.sub(r"<[^>]+>", " ", raw_desc).strip()[:500]
+                    desc = re.sub(r"\s+", " ", desc)
                     sl = stub.get("ntrp_str") or ""
                     if not sl:
-                        mn, mx = clinic.get("min_rating"), clinic.get("max_rating")
+                        mn = props.get("min_rating")
+                        mx = props.get("max_rating")
                         if mn and mx:
                             sl = f"{mn} / {mx}"
                         elif mn:
                             sl = f"{mn}+"
-
-                    # Price from packages
                     price = ""
-                    for pkg in (clinic.get("packages") or []):
-                        if not pkg.get("hidden") and pkg.get("price"):
-                            price = f"${float(pkg['price']):.0f}"
+                    for pl in (props.get("prices") or props.get("packages") or []):
+                        if not pl.get("hidden") and pl.get("price"):
+                            price = f"${float(pl['price']):.0f}"
                             break
 
-                    # Lessons
-                    for lesson in (clinic.get("clinic_lessons") or []):
+                    for lesson in lessons_raw:
                         ld = lesson.get("lesson_date")
                         if ld not in date_strs:
                             continue
@@ -205,14 +210,11 @@ async def scrape_pbp_venue(
                         hs = lesson.get("hour_start", 0)
                         he = lesson.get("hour_end", hs + 3600)
 
-                        # Lesson price override
                         lp = price
                         for ip in (lesson.get("individual_prices") or []):
                             if ip.get("price"):
                                 lp = f"${float(ip['price']):.0f}"
                                 break
-                        if not lp and lesson.get("price"):
-                            lp = f"${float(lesson['price']):.0f}"
 
                         # Roster
                         roster = []
