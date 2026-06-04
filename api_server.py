@@ -448,7 +448,36 @@ async def debug_supabase():
 
 # ── PlayByPoint ─────────────────────────────────────────────────────────────
 
-@app.get("/api/debug/session")
+@app.get("/api/debug/availability")
+async def debug_availability():
+    """Test a single venue availability call to diagnose issues."""
+    from datetime import date as date_type
+    import datetime as dt
+    cookies, user_id, _ = _load_session_with_env_fallback()
+    if not cookies:
+        return {"error": "no cookies"}
+    
+    target_date = date_type.today() + dt.timedelta(days=1)
+    try:
+        async with PlayByPointAPI(cookies=cookies, club_slug="nplpickleball", proxy=PROXY_URL) as api:
+            api._user_id = user_id
+            hours_data = await api.available_hours(597, target_date)
+            all_slots = (hours_data or {}).get("available_hours") or [] if isinstance(hours_data, dict) else (hours_data or [])
+            available = [s for s in all_slots if isinstance(s, dict) and s.get("available")]
+            return {
+                "date": target_date.isoformat(),
+                "proxy_set": bool(PROXY_URL),
+                "hours_data_type": type(hours_data).__name__,
+                "total_slots": len(all_slots),
+                "available_slots": len(available),
+                "first_slot": all_slots[0] if all_slots else None,
+                "raw_sample": str(hours_data)[:300] if hours_data else None,
+            }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+
 async def debug_session():
     cookies, user_id, email = _load_session_with_env_fallback()
     raw = os.environ.get("PBP_COOKIES_JSON", "")
