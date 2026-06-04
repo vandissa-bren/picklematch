@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Optional
 import sys
 
-import uvicorn
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -112,6 +112,7 @@ app = FastAPI(
     title="PickleMatch API",
     description="Real-time pickleball court availability aggregator",
     version="1.0.0",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
@@ -452,6 +453,53 @@ async def _get_pbp_availability(
 
 
 # ── Routes ──────────────────────────────────────────────────────────────────
+
+@app.get("/api/health")
+async def _warm_cache():
+    """Pre-warm availability cache for today and tomorrow."""
+    from datetime import date as date_type
+    await asyncio.sleep(5)  # Wait for server to fully start
+    for days_ahead in [0, 1]:
+        try:
+            target = date_type.today()
+            if days_ahead:
+                target = date_type.fromordinal(target.toordinal() + 1)
+            date_str = target.isoformat()
+            cache_key = f"availability:{date_str}:08:00:23:00:all"
+            if not _cache_get(cache_key):
+                cookies, user_id, _ = _load_session_with_env_fallback()
+                if cookies:
+                    results = await asyncio.gather(*[
+                        _get_pbp_availability(fid, VENUE_NAMES.get(fid, f"Venue {fid}"), slug, target, _hhmm_to_sec("08:00"), _hhmm_to_sec("23:00"))
+                        for fid, slug in PBP_SLUG_MAP.items()
+                    ], return_exceptions=True)
+                    court_blocks_by_id = {r["id"]: r.get("court_blocks", []) for r in results if isinstance(r, dict)}
+                    supabase_data = await _read_from_supabase("playbypoint")
+                    output = []
+                    for r in supabase_data:
+                        vid = r.get("id")
+                        filtered_sessions = [s for s in r.get("sessions", []) if s.get("date") == date_str and (s.get("start", "00:00") == "00:00" or _hhmm_to_sec("08:00") <= _hhmm_to_sec(s["start"]) < _hhmm_to_sec("23:00"))]
+                        output.append({"id": vid, "name": r.get("name"), "slug": r.get("slug"), "platform": "playbypoint", "court_blocks": court_blocks_by_id.get(vid, []), "sessions": filtered_sessions, "error": None})
+                    response = {"date": date_str, "from": "08:00", "to": "23:00", "venues": output, "total_court_blocks": sum(len(v["court_blocks"]) for v in output), "total_sessions": sum(len(v["sessions"]) for v in output), "source": "live", "cached_count": len(output)}
+                    _cache_set(cache_key, response)
+                    logger.info(f"Cache warmed for {date_str}: {response['total_court_blocks']} blocks, {response['total_sessions']} sessions")
+        except Exception as e:
+            logger.error(f"Cache warm error: {e}")
+
+
+async def _cache_refresh_loop():
+    """Refresh cache every 4 minutes in the background."""
+    while True:
+        await asyncio.sleep(240)  # 4 minutes
+        await _warm_cache()
+
+
+@asynccontextmanager
+async def lifespan(app):
+    asyncio.create_task(_warm_cache())
+    asyncio.create_task(_cache_refresh_loop())
+    yield
+
 
 @app.get("/api/health")
 async def health():
