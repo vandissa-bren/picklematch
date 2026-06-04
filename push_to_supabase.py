@@ -160,12 +160,39 @@ async def scrape_pbp_venue(
                 for stub in clinic_stubs:
                     program_name = stub.get("name", "Session")
                     clinic_id = stub.get("id")
-                    program_price = ""
-                    description = ""
                     skill_level = stub.get("ntrp_str") or ""
+                    description = ""
+                    program_price = ""
+                    category = stub.get("category") or "Session"
 
-                    # Fetch clinic detail for description, skill level, lessons.
-                    lessons = []
+                    # Compute lesson dates from future_week_days (0=Sun,1=Mon,...,6=Sat in PBP)
+                    # PBP uses JS weekday: 0=Sun, 1=Mon, 2=Tue, 3=Wed, 4=Thu, 5=Fri, 6=Sat
+                    week_days = stub.get("future_week_days") or []
+                    end_date_str = stub.get("end_date") or ""
+                    try:
+                        end_dt = date.fromisoformat(end_date_str)
+                    except Exception:
+                        end_dt = dates[-1]
+
+                    lesson_dates = []
+                    for d in dates:
+                        # Python weekday: 0=Mon..6=Sun; PBP: 0=Sun,1=Mon..6=Sat
+                        py_wd = d.weekday()  # 0=Mon
+                        pbp_wd = (py_wd + 1) % 7  # convert to PBP (0=Sun)
+                        if pbp_wd in week_days and d <= end_dt:
+                            lesson_dates.append(d)
+
+                    if not lesson_dates:
+                        continue
+
+                    # Fetch roster for each lesson date via lesson_players endpoint.
+                    # First get lesson IDs by fetching clinic detail once.
+                    lesson_id_map = {}  # date_str -> lesson_id
+                    spots_map = {}      # date_str -> spots_left
+                    capacity_map = {}   # date_str -> capacity
+                    price_map = {}      # date_str -> price
+                    hour_map = {}       # date_str -> (hour_start, hour_end)
+
                     if clinic_id:
                         try:
                             clinic_data = await api._get_json(f"/api/public/clinics/{clinic_id}")
@@ -181,45 +208,37 @@ async def scrape_pbp_venue(
                                     skill_level = f"{min_r} / {max_r}"
                                 elif min_r:
                                     skill_level = f"{min_r}+"
-                            lessons = clinic.get("clinic_lessons") or clinic.get("sessions") or []
-                            # Price from packages
                             for pkg in (clinic.get("packages") or []):
                                 if not pkg.get("hidden") and pkg.get("price"):
                                     program_price = f"${float(pkg['price']):.0f}"
                                     break
+                            for lesson in (clinic.get("clinic_lessons") or []):
+                                ld = lesson.get("lesson_date")
+                                if ld:
+                                    lesson_id_map[ld] = lesson.get("id")
+                                    cap = lesson.get("capacity") or stub.get("capacity") or 0
+                                    pc = lesson.get("player_count", 0)
+                                    spots_map[ld] = max(0, cap - pc) if cap else None
+                                    capacity_map[ld] = cap
+                                    price_map[ld] = program_price
+                                    hour_map[ld] = (lesson.get("hour_start", 0), lesson.get("hour_end", 3600))
                         except Exception:
                             pass
 
-                    for lesson in lessons:
-                        if lesson.get("lesson_date") not in date_strs:
+                    for lesson_date in lesson_dates:
+                        date_str = lesson_date.isoformat()
+                        if date_str not in lesson_id_map:
                             continue
-                        hs = lesson.get("hour_start", 0)
-                        he = lesson.get("hour_end", hs + 3600)
-                        capacity = lesson.get("capacity") or stub.get("capacity") or 0
-                        player_count = lesson.get("player_count", 0)
-                        spots_left = max(0, capacity - player_count) if capacity else None
+                        lesson_id = lesson_id_map[date_str]
+                        spots_left = spots_map.get(date_str)
                         if spots_left == 0:
                             continue
-                        price = ""
-                        ind = lesson.get("individual_prices") or []
-                        if ind:
-                            amounts = [p.get("price", 0) for p in ind if p.get("price")]
-                            if amounts:
-                                price = f"${min(amounts):.0f}"
-                        if not price:
-                            pv = lesson.get("price") or lesson.get("fee")
-                            if pv:
-                                price = f"${float(pv):.0f}"
-                        if not price:
-                            price = program_price  # from props["prices"]
-                        if not price:
-                            pv = stub.get("price") or stub.get("fee")
-                            if pv:
-                                price = f"${float(pv):.0f}"
+                        capacity = capacity_map.get(date_str, 0)
+                        hs, he = hour_map.get(date_str, (0, 3600))
+                        price = price_map.get(date_str, program_price)
 
                         # Fetch roster.
                         roster = []
-                        lesson_id = lesson.get("id")
                         if lesson_id:
                             try:
                                 roster_data = await api._get_json(
@@ -241,8 +260,8 @@ async def scrape_pbp_venue(
 
                         result["sessions"].append({
                             "title": program_name,
-                            "type": stub.get("category") or "Session",
-                            "date": lesson.get("lesson_date"),
+                            "type": category,
+                            "date": date_str,
                             "start": _sec_to_hhmm(hs),
                             "end": _sec_to_hhmm(he),
                             "price": price,
@@ -253,6 +272,7 @@ async def scrape_pbp_venue(
                             "roster": roster,
                             "lesson_id": lesson_id,
                         })
+
             except Exception as e:
                 console.print(f"    [yellow]sessions error for {name}: {e}[/yellow]")
 
