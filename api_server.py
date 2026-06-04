@@ -55,7 +55,23 @@ from extract_sportlogic import (
 
 logger = logging.getLogger("pickleball_api")
 
-# ── In-memory cookie store ───────────────────────────────────────────────────
+# ── In-memory availability cache ────────────────────────────────────────────
+_availability_cache: dict = {}  # key -> {"data": ..., "expires": timestamp}
+CACHE_TTL = 300  # 5 minutes
+
+def _cache_get(key: str):
+    entry = _availability_cache.get(key)
+    if entry and datetime.utcnow().timestamp() < entry["expires"]:
+        return entry["data"]
+    return None
+
+def _cache_set(key: str, data):
+    _availability_cache[key] = {
+        "data": data,
+        "expires": datetime.utcnow().timestamp() + CACHE_TTL,
+    }
+
+
 # Cookies can be refreshed at runtime via POST /api/internal/refresh-cookies
 _runtime_cookies: dict = {}
 _runtime_user_id: int = 0
@@ -539,47 +555,67 @@ async def pbp_availability(
     to_sec = _hhmm_to_sec(to_time)
 
     ids_filter = {int(i.strip()) for i in venue_ids.split(",")} if venue_ids else None
+    cache_key = f"availability:{date_str}:{from_time}:{to_time}:{venue_ids or 'all'}"
+
+    # Check in-memory cache first
+    cached_result = _cache_get(cache_key)
+    if cached_result:
+        return cached_result
 
     slug_map = {k: v for k, v in PBP_SLUG_MAP.items() if not ids_filter or k in ids_filter}
 
     cookies, user_id, _ = _load_session_with_env_fallback()
-    if not cookies:
-        # Fall back to Supabase cache if no session
-        cached = await _read_from_supabase("playbypoint")
-        if ids_filter:
-            cached = [r for r in cached if r.get("id") in ids_filter]
-        output = []
-        for r in cached:
-            by_date = r.get("by_date", {})
-            all_blocks = by_date.get(date_str, [])
-            filtered_blocks = [b for b in all_blocks if from_sec <= _hhmm_to_sec(b["start"]) < to_sec]
-            all_sessions = r.get("sessions", [])
-            filtered_sessions = [s for s in all_sessions if s.get("date") == date_str and from_sec <= _hhmm_to_sec(s["start"]) < to_sec]
-            output.append({"id": r.get("id"), "name": r.get("name"), "slug": r.get("slug"), "platform": "playbypoint", "court_blocks": filtered_blocks, "sessions": filtered_sessions, "error": None})
-        return {"date": date_str, "from": from_time, "to": to_time, "venues": output, "total_court_blocks": sum(len(v["court_blocks"]) for v in output), "total_sessions": sum(len(v["sessions"]) for v in output), "source": "supabase_cache", "cached_count": len(output)}
 
-    # Live fetch via proxy
-    results = await asyncio.gather(*[
-        _get_pbp_availability(fid, VENUE_NAMES.get(fid, f"Venue {fid}"), slug, target_date, from_sec, to_sec)
-        for fid, slug in slug_map.items()
-    ], return_exceptions=True)
+    # Fetch court blocks live (fast from DO server)
+    if cookies:
+        results = await asyncio.gather(*[
+            _get_pbp_availability(fid, VENUE_NAMES.get(fid, f"Venue {fid}"), slug, target_date, from_sec, to_sec)
+            for fid, slug in slug_map.items()
+        ], return_exceptions=True)
+        court_blocks_by_id = {}
+        for r in results:
+            if isinstance(r, dict):
+                court_blocks_by_id[r["id"]] = r.get("court_blocks", [])
+    else:
+        court_blocks_by_id = {}
+
+    # Fetch sessions from Supabase cache
+    supabase_data = await _read_from_supabase("playbypoint")
+    if ids_filter:
+        supabase_data = [r for r in supabase_data if r.get("id") in ids_filter]
 
     output = []
-    for r in results:
-        if isinstance(r, Exception) or not isinstance(r, dict):
-            continue
-        output.append(r)
+    for r in supabase_data:
+        vid = r.get("id")
+        all_sessions = r.get("sessions", [])
+        filtered_sessions = [
+            s for s in all_sessions
+            if s.get("date") == date_str
+            and (s.get("start", "00:00") == "00:00" or from_sec <= _hhmm_to_sec(s["start"]) < to_sec)
+        ]
+        output.append({
+            "id": vid,
+            "name": r.get("name"),
+            "slug": r.get("slug"),
+            "platform": "playbypoint",
+            "court_blocks": court_blocks_by_id.get(vid, []),
+            "sessions": filtered_sessions,
+            "error": None,
+        })
 
-    return {
+    response = {
         "date": date_str,
         "from": from_time,
         "to": to_time,
         "venues": output,
-        "total_court_blocks": sum(len(v.get("court_blocks", [])) for v in output),
-        "total_sessions": sum(len(v.get("sessions", [])) for v in output),
+        "total_court_blocks": sum(len(v["court_blocks"]) for v in output),
+        "total_sessions": sum(len(v["sessions"]) for v in output),
         "source": "live",
         "cached_count": len(output),
     }
+
+    _cache_set(cache_key, response)
+    return response
 
 
 @app.get("/api/pbp/venue/{facility_id}")
