@@ -3151,14 +3151,15 @@ class PlayByPointAPI:
     """
 
     def __init__(
-        self,
-        *,
-        cookies: dict[str, str],
-        app_base_url: str = APP_BASE_URL,
-        club_slug: str = DEFAULT_CLUB_SLUG,
-        user_agent: str = PBP_USER_AGENT,
-        timeout: float = 15.0,
-        rate_limit: float = 0.05,
+            self,
+            *,
+            cookies: dict[str, str],
+            app_base_url: str = APP_BASE_URL,
+            club_slug: str = DEFAULT_CLUB_SLUG,
+            user_agent: str = PBP_USER_AGENT,
+            timeout: float = 15.0,
+            rate_limit: float = 0.05,
+            proxy: Optional[str] = None,
     ) -> None:
         self.app_base_url = app_base_url.rstrip("/")
         self.club_slug = club_slug
@@ -3175,6 +3176,7 @@ class PlayByPointAPI:
         self._cookies = cookies
         self._timeout = timeout
         self._user_id: Optional[int] = None  # discovered at runtime
+        self._proxy = proxy
 
         # Try curl_cffi first (browser-impersonating TLS).
         self._impl = "httpx"
@@ -3182,13 +3184,16 @@ class PlayByPointAPI:
         try:
             from curl_cffi.requests import AsyncSession  # type: ignore
             # 'chrome' alias auto-picks a recent Chrome profile.
-            self._client = AsyncSession(
+            session_kwargs = dict(
                 base_url=self.app_base_url,
                 headers=self._headers,
                 cookies=self._cookies,
                 timeout=timeout,
                 impersonate="chrome",
             )
+            if proxy:
+                session_kwargs["proxies"] = {"https": proxy, "http": proxy}
+            self._client = AsyncSession(**session_kwargs)
             self._impl = "curl_cffi"
             logger.debug("PBP API client using curl_cffi (chrome TLS).")
         except ImportError:
