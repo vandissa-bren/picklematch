@@ -453,7 +453,6 @@ async def _get_pbp_availability(
 
 # ── Routes ──────────────────────────────────────────────────────────────────
 
-@app.get("/api/health")
 async def _warm_cache():
     """Pre-warm availability cache for today and tomorrow."""
     from datetime import date as date_type
