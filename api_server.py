@@ -92,6 +92,7 @@ app.add_middleware(
 # ── Supabase REST helper ─────────────────────────────────────────────────────
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://stwohmddmdwttasbyblt.supabase.co")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InN0d29obWRkbWR3dHRhc2J5Ymx0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg3MjQ3OTMsImV4cCI6MjA5NDMwMDc5M30.x7VcVmJZ35S1uZy9_SU5RlB_MnuLziX2v81y9l02Yy8")
+PROXY_URL = os.environ.get("PROXY_URL")  # e.g. http://user:pass@p.webshare.io:80
 
 
 async def _read_from_supabase(platform: str) -> list[dict]:
@@ -134,6 +135,25 @@ PBP_SLUG_MAP: dict[int, str] = {
     1714: "RunwayPickleball",
 }
 
+VENUE_NAMES: dict[int, str] = {
+    597:  "The Jar | South Melbourne",
+    885:  "SportsWell | Pickleball Palace",
+    1009: "Eastern Indoor Pickleball Club",
+    1379: "PICKLEHOLIC",
+    1355: "State Pickleball Centre",
+    1383: "Melbourne Pickle Club",
+    1485: "Pickle Haus",
+    755:  "Level Up Pickleball Knox City",
+    1584: "The Room Pickleball",
+    1461: "The Real Dill | Ravenhall",
+    1532: "PicklePlex",
+    1557: "Dink & Drive Pickleball Club",
+    1119: "Swing & Serve",
+    1487: "Pickle Playground",
+    1664: "The Rally Pickleball | Altona",
+    1714: "Runway Pickleball",
+}
+
 # ── Helpers ─────────────────────────────────────────────────────────────────
 
 def _sec_to_hhmm(sec: int) -> str:
@@ -155,7 +175,7 @@ async def _get_pbp_venues() -> list[dict]:
 
     venues = []
     try:
-        async with PlayByPointAPI(cookies=cookies, club_slug="nplpickleball") as api:
+        async with PlayByPointAPI(cookies=cookies, club_slug="nplpickleball", proxy=PROXY_URL) as api:
             api._user_id = user_id
             facs = await api.preferred_facilities(user_id)
             seen = set()
@@ -216,7 +236,7 @@ async def _get_pbp_availability(
         return result
 
     try:
-        async with PlayByPointAPI(cookies=cookies, club_slug=slug) as api:
+        async with PlayByPointAPI(cookies=cookies, club_slug=slug, proxy=PROXY_URL) as api:
             api._user_id = user_id
 
             # Auto-detect surface.
@@ -428,7 +448,21 @@ async def debug_supabase():
 
 # ── PlayByPoint ─────────────────────────────────────────────────────────────
 
-@app.get("/api/pbp/venues")
+@app.get("/api/debug/session")
+async def debug_session():
+    cookies, user_id, email = _load_session_with_env_fallback()
+    raw = os.environ.get("PBP_COOKIES_JSON", "")
+    return {
+        "has_cookies": bool(cookies),
+        "cookie_count": len(cookies),
+        "user_id": user_id,
+        "email": email,
+        "env_var_length": len(raw),
+        "proxy_url": os.environ.get("PROXY_URL", "not set")[:30] if os.environ.get("PROXY_URL") else "not set",
+    }
+
+
+
 async def pbp_venues():
     """List all saved PBP venues from Supabase cache."""
     cached = await _read_from_supabase("playbypoint")
@@ -453,8 +487,8 @@ async def pbp_availability(
     venue_ids: Optional[str] = Query(None, description="Comma-separated IDs, default all saved"),
 ):
     """
-    Get court blocks + sessions for PBP venues from Supabase cache.
-    Data is populated by push_to_supabase.py running locally.
+    Get court blocks + sessions for PBP venues via live API calls through residential proxy.
+    Falls back to Supabase cache if proxy calls fail.
     """
     target_date = (datetime.strptime(date, "%Y-%m-%d").date()
                    if date else datetime.today().date())
@@ -462,49 +496,46 @@ async def pbp_availability(
     from_sec = _hhmm_to_sec(from_time)
     to_sec = _hhmm_to_sec(to_time)
 
-    # Read from Supabase cache.
-    cached = await _read_from_supabase("playbypoint")
+    ids_filter = {int(i.strip()) for i in venue_ids.split(",")} if venue_ids else None
 
-    if venue_ids:
-        ids = {int(i.strip()) for i in venue_ids.split(",")}
-        cached = [r for r in cached if r.get("id") in ids]
+    slug_map = {k: v for k, v in PBP_SLUG_MAP.items() if not ids_filter or k in ids_filter}
+
+    cookies, user_id, _ = _load_session_with_env_fallback()
+    if not cookies:
+        # Fall back to Supabase cache if no session
+        cached = await _read_from_supabase("playbypoint")
+        if ids_filter:
+            cached = [r for r in cached if r.get("id") in ids_filter]
+        output = []
+        for r in cached:
+            by_date = r.get("by_date", {})
+            all_blocks = by_date.get(date_str, [])
+            filtered_blocks = [b for b in all_blocks if from_sec <= _hhmm_to_sec(b["start"]) < to_sec]
+            all_sessions = r.get("sessions", [])
+            filtered_sessions = [s for s in all_sessions if s.get("date") == date_str and from_sec <= _hhmm_to_sec(s["start"]) < to_sec]
+            output.append({"id": r.get("id"), "name": r.get("name"), "slug": r.get("slug"), "platform": "playbypoint", "court_blocks": filtered_blocks, "sessions": filtered_sessions, "error": None})
+        return {"date": date_str, "from": from_time, "to": to_time, "venues": output, "total_court_blocks": sum(len(v["court_blocks"]) for v in output), "total_sessions": sum(len(v["sessions"]) for v in output), "source": "supabase_cache", "cached_count": len(output)}
+
+    # Live fetch via proxy
+    results = await asyncio.gather(*[
+        _get_pbp_availability(fid, VENUE_NAMES.get(fid, f"Venue {fid}"), slug, target_date, from_sec, to_sec)
+        for fid, slug in slug_map.items()
+    ], return_exceptions=True)
 
     output = []
-    for r in cached:
-        # Get court blocks for the requested date, filtered by time window.
-        by_date = r.get("by_date", {})
-        all_blocks = by_date.get(date_str, [])
-        filtered_blocks = [
-            b for b in all_blocks
-            if from_sec <= _hhmm_to_sec(b["start"]) < to_sec
-        ]
-
-        # Get sessions for the requested date, filtered by time window.
-        all_sessions = r.get("sessions", [])
-        filtered_sessions = [
-            s for s in all_sessions
-            if s.get("date") == date_str
-            and from_sec <= _hhmm_to_sec(s["start"]) < to_sec
-        ]
-
-        output.append({
-            "id": r.get("id"),
-            "name": r.get("name"),
-            "slug": r.get("slug"),
-            "platform": "playbypoint",
-            "court_blocks": filtered_blocks,
-            "sessions": filtered_sessions,
-            "error": None,
-        })
+    for r in results:
+        if isinstance(r, Exception) or not isinstance(r, dict):
+            continue
+        output.append(r)
 
     return {
         "date": date_str,
         "from": from_time,
         "to": to_time,
         "venues": output,
-        "total_court_blocks": sum(len(v["court_blocks"]) for v in output),
-        "total_sessions": sum(len(v["sessions"]) for v in output),
-        "source": "supabase_cache",
+        "total_court_blocks": sum(len(v.get("court_blocks", [])) for v in output),
+        "total_sessions": sum(len(v.get("sessions", [])) for v in output),
+        "source": "live",
         "cached_count": len(output),
     }
 
@@ -932,64 +963,43 @@ async def pbp_book_court(req: CourtBookingRequest):
         raise HTTPException(status_code=401, detail="PBP session not yet active. Please run the sync script or wait a few minutes.")
 
     try:
-        from datetime import date as date_type
         slug = PBP_SLUG_MAP.get(req.facility_id, "")
         target_date = datetime.strptime(req.date, "%Y-%m-%d").date()
         start_sec = _hhmm_to_sec(req.start_time)
         end_sec = _hhmm_to_sec(req.end_time)
 
-        # Look up court_id from Supabase cache (avoids live PBP call blocked by Cloudflare).
-        court_id = None
-        try:
-            import urllib.parse
-            court_name_enc = urllib.parse.quote(req.court_name)
-            lookup_url = f"{SUPABASE_URL}/rest/v1/court_ids?facility_id=eq.{req.facility_id}&court_name=eq.{court_name_enc}&select=court_id&limit=1"
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                cr = await client.get(lookup_url, headers={
-                    "apikey": SUPABASE_KEY,
-                    "Authorization": f"Bearer {SUPABASE_KEY}",
-                })
-                rows = cr.json() if cr.status_code == 200 else []
-                if rows:
-                    court_id = rows[0].get("court_id")
-        except Exception:
-            pass
-
-        if not court_id:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Court '{req.court_name}' not found. Please run push_to_supabase.py to refresh court IDs."
-            )
-
-        async with PlayByPointAPI(cookies=cookies, club_slug=slug) as api:
+        async with PlayByPointAPI(cookies=cookies, club_slug=slug, proxy=PROXY_URL) as api:
             api._user_id = pbp_user_id
 
-            # Look up cached CSRF token from Supabase (Railway can't fetch it live).
-            csrf_token = None
+            # Get surface type.
+            surface = "pickleball"
             try:
-                async with httpx.AsyncClient(timeout=10.0) as client:
-                    cr = await client.get(
-                        f"{SUPABASE_URL}/rest/v1/csrf_tokens?slug=eq.{slug}&select=token&limit=1",
-                        headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"},
-                    )
-                    rows = cr.json() if cr.status_code == 200 else []
-                    if rows:
-                        csrf_token = rows[0].get("token")
+                ct = await api.court_types(req.facility_id)
+                ps = [s for s in (ct or []) if "pickle" in (s.get("surface") or "").lower()]
+                if ps:
+                    surface = ps[0]["surface"]
             except Exception:
                 pass
 
-            if not csrf_token:
+            # Get court ID for the requested court name.
+            courts = await api.available_courts(
+                req.facility_id, target_date,
+                start_sec, start_sec + 1800,
+                surface=surface,
+            )
+            court_id = None
+            for c in (courts or []):
+                if c.get("name", "").lower() == req.court_name.lower():
+                    court_id = c.get("id")
+                    break
+
+            if not court_id:
                 raise HTTPException(
-                    status_code=503,
-                    detail="CSRF token not cached. Please run push_to_supabase.py to refresh."
+                    status_code=404,
+                    detail=f"Court '{req.court_name}' not found or no longer available."
                 )
 
-            # Monkey-patch _get_csrf_token to return cached token without hitting PBP.
-            async def _cached_csrf(*args, **kwargs):
-                return csrf_token
-            api._get_csrf_token = _cached_csrf
-
-            # Make the real booking using the cached CSRF token.
+            # Make the real booking — CSRF token fetched live via proxy.
             result = await api.book_court(
                 court_id=court_id,
                 day=target_date,
@@ -1051,7 +1061,7 @@ async def pbp_book(req: BookingRequest):
     # Use the stored cookies to make the booking.
     try:
         slug = req.program_slug or PBP_SLUG_MAP.get(req.clinic_id, "")
-        async with PlayByPointAPI(cookies=cookies, club_slug=slug) as api:
+        async with PlayByPointAPI(cookies=cookies, club_slug=slug, proxy=PROXY_URL) as api:
             api._user_id = pbp_user_id
 
             # Get plan_id if not provided.
