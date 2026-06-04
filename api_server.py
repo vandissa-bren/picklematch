@@ -31,6 +31,13 @@ from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+# Load .env file if present
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 # ── Scraper imports ────────────────────────────────────────────────────────
 sys.path.insert(0, str(Path(__file__).parent))
 from extract_thejar import (
@@ -48,17 +55,23 @@ from extract_sportlogic import (
 
 logger = logging.getLogger("pickleball_api")
 
+# ── In-memory cookie store ───────────────────────────────────────────────────
+# Cookies can be refreshed at runtime via POST /api/internal/refresh-cookies
+_runtime_cookies: dict = {}
+_runtime_user_id: int = 0
+_runtime_email: str = ""
+
 def _load_session_with_env_fallback():
     """
-    Load PBP session from local cache first.
-    Falls back to PBP_COOKIES_JSON environment variable (for Railway deployment).
+    Load PBP session — checks runtime store first, then env var, then local cache.
     """
-    # Try local cache first.
-    cookies, user_id, email = _load_cached_session()
-    if cookies:
-        return cookies, user_id, email
+    global _runtime_cookies, _runtime_user_id, _runtime_email
 
-    # Fall back to environment variable.
+    # Runtime store (pushed via /api/internal/refresh-cookies)
+    if _runtime_cookies:
+        return _runtime_cookies, _runtime_user_id, _runtime_email
+
+    # Environment variable
     raw = os.environ.get("PBP_COOKIES_JSON", "")
     if raw:
         try:
@@ -67,10 +80,14 @@ def _load_session_with_env_fallback():
             user_id = data.get("user_id", 0)
             email = data.get("email", "")
             if cookies:
-                logger.info(f"Loaded PBP cookies from PBP_COOKIES_JSON env var (user: {email})")
                 return cookies, user_id, email
         except Exception as e:
             logger.error(f"Failed to parse PBP_COOKIES_JSON: {e}")
+
+    # Local cache file
+    cookies, user_id, email = _load_cached_session()
+    if cookies:
+        return cookies, user_id, email
 
     return {}, 0, ""
 
@@ -425,6 +442,31 @@ async def health():
     return {"status": "ok", "time": datetime.utcnow().isoformat()}
 
 
+class RefreshCookiesRequest(BaseModel):
+    pbp_cookies_json: str
+    secret: str = ""
+
+
+@app.post("/api/internal/refresh-cookies")
+async def refresh_cookies(req: RefreshCookiesRequest):
+    """Accept fresh PBP cookies pushed from the Windows machine."""
+    global _runtime_cookies, _runtime_user_id, _runtime_email
+    try:
+        data = json.loads(req.pbp_cookies_json)
+        cookies = data.get("cookies", {})
+        user_id = data.get("user_id", 0)
+        email = data.get("email", "")
+        if not cookies:
+            raise HTTPException(status_code=400, detail="No cookies in payload")
+        _runtime_cookies = cookies
+        _runtime_user_id = user_id
+        _runtime_email = email
+        logger.info(f"Runtime cookies refreshed for {email} ({len(cookies)} cookies)")
+        return {"status": "ok", "email": email, "cookie_count": len(cookies)}
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+
+
 @app.get("/api/debug/supabase")
 async def debug_supabase():
     """Debug endpoint to check Supabase connectivity and data."""
@@ -448,36 +490,7 @@ async def debug_supabase():
 
 # ── PlayByPoint ─────────────────────────────────────────────────────────────
 
-@app.get("/api/debug/availability")
-async def debug_availability():
-    """Test a single venue availability call to diagnose issues."""
-    from datetime import date as date_type
-    import datetime as dt
-    cookies, user_id, _ = _load_session_with_env_fallback()
-    if not cookies:
-        return {"error": "no cookies"}
-    
-    target_date = date_type.today() + dt.timedelta(days=1)
-    try:
-        async with PlayByPointAPI(cookies=cookies, club_slug="nplpickleball", proxy=PROXY_URL) as api:
-            api._user_id = user_id
-            hours_data = await api.available_hours(597, target_date)
-            all_slots = (hours_data or {}).get("available_hours") or [] if isinstance(hours_data, dict) else (hours_data or [])
-            available = [s for s in all_slots if isinstance(s, dict) and s.get("available")]
-            return {
-                "date": target_date.isoformat(),
-                "proxy_set": bool(PROXY_URL),
-                "hours_data_type": type(hours_data).__name__,
-                "total_slots": len(all_slots),
-                "available_slots": len(available),
-                "first_slot": all_slots[0] if all_slots else None,
-                "raw_sample": str(hours_data)[:300] if hours_data else None,
-            }
-    except Exception as e:
-        return {"error": str(e)}
-
-
-
+@app.get("/api/debug/session")
 async def debug_session():
     cookies, user_id, email = _load_session_with_env_fallback()
     raw = os.environ.get("PBP_COOKIES_JSON", "")
@@ -516,8 +529,8 @@ async def pbp_availability(
     venue_ids: Optional[str] = Query(None, description="Comma-separated IDs, default all saved"),
 ):
     """
-    Get court blocks + sessions for PBP venues from Supabase cache.
-    Cache is populated by push_to_supabase.py running locally.
+    Get court blocks + sessions for PBP venues via live API calls through residential proxy.
+    Falls back to Supabase cache if proxy calls fail.
     """
     target_date = (datetime.strptime(date, "%Y-%m-%d").date()
                    if date else datetime.today().date())
@@ -525,37 +538,46 @@ async def pbp_availability(
     from_sec = _hhmm_to_sec(from_time)
     to_sec = _hhmm_to_sec(to_time)
 
-    cached = await _read_from_supabase("playbypoint")
+    ids_filter = {int(i.strip()) for i in venue_ids.split(",")} if venue_ids else None
 
-    if venue_ids:
-        ids = {int(i.strip()) for i in venue_ids.split(",")}
-        cached = [r for r in cached if r.get("id") in ids]
+    slug_map = {k: v for k, v in PBP_SLUG_MAP.items() if not ids_filter or k in ids_filter}
+
+    cookies, user_id, _ = _load_session_with_env_fallback()
+    if not cookies:
+        # Fall back to Supabase cache if no session
+        cached = await _read_from_supabase("playbypoint")
+        if ids_filter:
+            cached = [r for r in cached if r.get("id") in ids_filter]
+        output = []
+        for r in cached:
+            by_date = r.get("by_date", {})
+            all_blocks = by_date.get(date_str, [])
+            filtered_blocks = [b for b in all_blocks if from_sec <= _hhmm_to_sec(b["start"]) < to_sec]
+            all_sessions = r.get("sessions", [])
+            filtered_sessions = [s for s in all_sessions if s.get("date") == date_str and from_sec <= _hhmm_to_sec(s["start"]) < to_sec]
+            output.append({"id": r.get("id"), "name": r.get("name"), "slug": r.get("slug"), "platform": "playbypoint", "court_blocks": filtered_blocks, "sessions": filtered_sessions, "error": None})
+        return {"date": date_str, "from": from_time, "to": to_time, "venues": output, "total_court_blocks": sum(len(v["court_blocks"]) for v in output), "total_sessions": sum(len(v["sessions"]) for v in output), "source": "supabase_cache", "cached_count": len(output)}
+
+    # Live fetch via proxy
+    results = await asyncio.gather(*[
+        _get_pbp_availability(fid, VENUE_NAMES.get(fid, f"Venue {fid}"), slug, target_date, from_sec, to_sec)
+        for fid, slug in slug_map.items()
+    ], return_exceptions=True)
 
     output = []
-    for r in cached:
-        by_date = r.get("by_date", {})
-        all_blocks = by_date.get(date_str, [])
-        filtered_blocks = [b for b in all_blocks if from_sec <= _hhmm_to_sec(b["start"]) < to_sec]
-        all_sessions = r.get("sessions", [])
-        filtered_sessions = [s for s in all_sessions if s.get("date") == date_str and from_sec <= _hhmm_to_sec(s["start"]) < to_sec]
-        output.append({
-            "id": r.get("id"),
-            "name": r.get("name"),
-            "slug": r.get("slug"),
-            "platform": "playbypoint",
-            "court_blocks": filtered_blocks,
-            "sessions": filtered_sessions,
-            "error": None,
-        })
+    for r in results:
+        if isinstance(r, Exception) or not isinstance(r, dict):
+            continue
+        output.append(r)
 
     return {
         "date": date_str,
         "from": from_time,
         "to": to_time,
         "venues": output,
-        "total_court_blocks": sum(len(v["court_blocks"]) for v in output),
-        "total_sessions": sum(len(v["sessions"]) for v in output),
-        "source": "supabase_cache",
+        "total_court_blocks": sum(len(v.get("court_blocks", [])) for v in output),
+        "total_sessions": sum(len(v.get("sessions", [])) for v in output),
+        "source": "live",
         "cached_count": len(output),
     }
 
