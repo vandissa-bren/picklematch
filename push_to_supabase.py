@@ -53,6 +53,9 @@ console = Console()
 SUPABASE_URL = "https://stwohmddmdwttasbyblt.supabase.co"
 SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InN0d29obWRkbWR3dHRhc2J5Ymx0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg3MjQ3OTMsImV4cCI6MjA5NDMwMDc5M30.x7VcVmJZ35S1uZy9_SU5RlB_MnuLziX2v81y9l02Yy8"
 
+import os as _os
+PROXY_URL = _os.environ.get("PROXY_URL")  # e.g. http://user:pass@p.webshare.io:80
+
 PBP_SLUG_MAP: dict[int, str] = {
     597:  "nplpickleball",
     885:  "sportswellpickleballpalace",
@@ -119,7 +122,7 @@ async def scrape_pbp_venue(
         return result
 
     try:
-        async with PlayByPointAPI(cookies=cookies, club_slug=slug) as api:
+        async with PlayByPointAPI(cookies=cookies, club_slug=slug, proxy=PROXY_URL) as api:
             api._user_id = user_id
 
             # Surface detection.
@@ -132,64 +135,11 @@ async def scrape_pbp_venue(
             except Exception:
                 pass
 
-            # Scrape court availability per date — call available_courts for each 30min slot.
-            DAY_SLOTS = list(range(6 * 3600, 23 * 3600, 1800))  # 6am–11pm in 30min steps
+            # Court blocks are served live from api_server.py — skip slow per-slot scraping.
+            for target_date in dates:
+                result["by_date"][target_date.isoformat()] = []
 
-            for i_date, target_date in enumerate(dates):
-                if i_date > 0:
-                    await asyncio.sleep(2)
-                date_str = target_date.isoformat()
-                result["by_date"][date_str] = []
-                try:
-                    # For each 30min slot, get available courts.
-                    court_slots: dict[tuple, list[int]] = {}  # (id, name) -> [start_secs, ...]
-                    for slot_start in DAY_SLOTS:
-                        slot_end = slot_start + 1800
-                        try:
-                            courts = await api.available_courts(
-                                facility_id, target_date, slot_start, slot_end, surface=surface,
-                            )
-                            for c in (courts or []):
-                                cid = c.get("id")
-                                cname = c.get("name", "")
-                                if cid and cname and not c.get("is_parent"):
-                                    court_slots.setdefault((cid, cname), []).append(slot_start)
-                        except Exception:
-                            pass
-                        await asyncio.sleep(0.3)
 
-                    # Merge consecutive 30min slots into continuous blocks.
-                    for (cid, cname), starts in court_slots.items():
-                        starts_sorted = sorted(set(starts))
-                        run_start = run_end = None
-                        for s in starts_sorted:
-                            if run_start is None:
-                                run_start = run_end = s
-                            elif s == run_end + 1800:
-                                run_end = s
-                            else:
-                                dur = (run_end - run_start) // 60 + 30
-                                if dur >= 60:
-                                    result["by_date"][date_str].append({
-                                        "court": cname,
-                                        "court_id": cid,
-                                        "start": _sec_to_hhmm(run_start),
-                                        "end": _sec_to_hhmm(run_end + 1800),
-                                        "duration_min": dur,
-                                    })
-                                run_start = run_end = s
-                        if run_start is not None:
-                            dur = (run_end - run_start) // 60 + 30
-                            if dur >= 60:
-                                result["by_date"][date_str].append({
-                                    "court": cname,
-                                    "court_id": cid,
-                                    "start": _sec_to_hhmm(run_start),
-                                    "end": _sec_to_hhmm(run_end + 1800),
-                                    "duration_min": dur,
-                                })
-                except Exception as e:
-                    console.print(f"    [yellow]slots error for {name} {date_str}: {e}[/yellow]")
 
             # Sessions (across all dates).
             try:
@@ -498,23 +448,13 @@ async def run_once():
 
     dates = [date.today() + timedelta(days=i) for i in range(DAYS_AHEAD)]
 
+    # ── Refresh user PBP sessions ────────────────────────────────────────────
+    await refresh_user_sessions()
+
     # ── PlayByPoint ─────────────────────────────────────────────────────────
-    # Try env var first (server deployment), fall back to local cache file.
-    import os as _os, json as _json
-    cookies, user_id, email = {}, 0, ""
-    _raw = _os.environ.get("PBP_COOKIES_JSON", "")
-    if _raw:
-        try:
-            _d = _json.loads(_raw)
-            cookies = _d.get("cookies", {})
-            user_id = _d.get("user_id", 0)
-            email = _d.get("email", "")
-        except Exception:
-            pass
+    cookies, user_id, email = _load_cached_session()
     if not cookies:
-        cookies, user_id, email = _load_cached_session()
-    if not cookies:
-        console.print("[red]No PBP session. Set PBP_COOKIES_JSON or run the scraper first.[/red]")
+        console.print("[red]No PBP session. Run the scraper first.[/red]")
     else:
         console.print(f"[dim]PBP session: {email}[/dim]")
         console.print(f"Scraping {len(PBP_SLUG_MAP)} PBP venues × {DAYS_AHEAD} days…")
@@ -544,7 +484,7 @@ async def run_once():
         # Cache CSRF tokens per venue slug so Railway can book courts.
         console.print("Caching CSRF tokens…")
         csrf_records = []
-        async with PlayByPointAPI(cookies=cookies, club_slug="nplpickleball") as api:
+        async with PlayByPointAPI(cookies=cookies, club_slug="nplpickleball", proxy=PROXY_URL) as api:
             api._user_id = user_id
             for fid, slug in PBP_SLUG_MAP.items():
                 try:
