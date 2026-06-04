@@ -112,7 +112,6 @@ app = FastAPI(
     title="PickleMatch API",
     description="Real-time pickleball court availability aggregator",
     version="1.0.0",
-    lifespan=lifespan,
 )
 
 app.add_middleware(
@@ -494,11 +493,10 @@ async def _cache_refresh_loop():
         await _warm_cache()
 
 
-@asynccontextmanager
-async def lifespan(app):
+@app.on_event("startup")
+async def startup_event():
     asyncio.create_task(_warm_cache())
     asyncio.create_task(_cache_refresh_loop())
-    yield
 
 
 @app.get("/api/health")
