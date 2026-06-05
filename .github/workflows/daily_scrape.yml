@@ -18,7 +18,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install httpx curl_cffi loguru python-dotenv rich supabase typer playwright asyncio aiohttp
+          pip install httpx curl_cffi loguru python-dotenv rich supabase typer tenacity playwright
           playwright install chromium
 
       - name: Run session scrape
