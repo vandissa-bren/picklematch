@@ -29,6 +29,7 @@ PBP_SLUG_MAP = {
     1487: "Pickle-Playground",
     1664: "TheRallyPickleball",
     1714: "RunwayPickleball",
+    1733: "pickleballpowerhouse"
 }
 
 VENUE_NAMES = {
@@ -48,10 +49,12 @@ VENUE_NAMES = {
     1487: "Pickle Playground",
     1664: "The Rally Pickleball | Altona",
     1714: "Runway Pickleball",
+    1733: "Pickleball Powerhouse"
 }
 
 # Venues that use non-pickleball surface names for court hire
 VENUE_SURFACES = {
+    885: ["pickleball"],  # SportsWell - force pickleball surface
     1557: ["standard_courts", "championship_courts"],  # Dink & Drive
 }
 

@@ -100,7 +100,18 @@ def _load_session_with_env_fallback():
         except Exception as e:
             logger.error(f"Failed to parse PBP_COOKIES_JSON: {e}")
 
-    # Local cache file
+    # Local cache file at /app/.pbp_cookies.json
+    try:
+        from pathlib import Path
+        p = Path('/app/.pbp_cookies.json')
+        if p.exists():
+            data = json.loads(p.read_text())
+            cookies = data.get('cookies', {})
+            if cookies:
+                return cookies, data.get('user_id', 0), data.get('email', '')
+    except Exception:
+        pass
+    # Fallback to USER_DATA_DIR cache
     cookies, user_id, email = _load_cached_session()
     if cookies:
         return cookies, user_id, email
@@ -166,6 +177,7 @@ PBP_SLUG_MAP: dict[int, str] = {
     1487: "Pickle-Playground",
     1664: "TheRallyPickleball",
     1714: "RunwayPickleball",
+    1733: "pickleballpowerhouse"
 }
 
 VENUE_NAMES: dict[int, str] = {
@@ -185,6 +197,7 @@ VENUE_NAMES: dict[int, str] = {
     1487: "Pickle Playground",
     1664: "The Rally Pickleball | Altona",
     1714: "Runway Pickleball",
+    1733: "Pickleball Powerhouse"
 }
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
@@ -453,42 +466,55 @@ async def _get_pbp_availability(
 
 # ── Routes ──────────────────────────────────────────────────────────────────
 
-async def _warm_cache():
-    """Pre-warm availability cache for today and tomorrow."""
+async def _warm_single_date(target):
     from datetime import date as date_type
-    await asyncio.sleep(5)  # Wait for server to fully start
-    for days_ahead in [0, 1]:
-        try:
-            target = date_type.today()
-            if days_ahead:
-                target = date_type.fromordinal(target.toordinal() + 1)
-            date_str = target.isoformat()
-            cache_key = f"availability:{date_str}:08:00:23:00:all"
-            if not _cache_get(cache_key):
-                cookies, user_id, _ = _load_session_with_env_fallback()
-                if cookies:
-                    results = await asyncio.gather(*[
-                        _get_pbp_availability(fid, VENUE_NAMES.get(fid, f"Venue {fid}"), slug, target, _hhmm_to_sec("08:00"), _hhmm_to_sec("23:00"))
-                        for fid, slug in PBP_SLUG_MAP.items()
-                    ], return_exceptions=True)
-                    court_blocks_by_id = {r["id"]: r.get("court_blocks", []) for r in results if isinstance(r, dict)}
-                    supabase_data = await _read_from_supabase("playbypoint")
-                    output = []
-                    for r in supabase_data:
-                        vid = r.get("id")
-                        filtered_sessions = [s for s in r.get("sessions", []) if s.get("date") == date_str and (s.get("start", "00:00") == "00:00" or _hhmm_to_sec("08:00") <= _hhmm_to_sec(s["start"]) < _hhmm_to_sec("23:00"))]
-                        output.append({"id": vid, "name": r.get("name"), "slug": r.get("slug"), "platform": "playbypoint", "court_blocks": court_blocks_by_id.get(vid, []), "sessions": filtered_sessions, "error": None})
-                    response = {"date": date_str, "from": "08:00", "to": "23:00", "venues": output, "total_court_blocks": sum(len(v["court_blocks"]) for v in output), "total_sessions": sum(len(v["sessions"]) for v in output), "source": "live", "cached_count": len(output)}
-                    _cache_set(cache_key, response)
-                    logger.info(f"Cache warmed for {date_str}: {response['total_court_blocks']} blocks, {response['total_sessions']} sessions")
-        except Exception as e:
-            logger.error(f"Cache warm error: {e}")
+    date_str = target.isoformat()
+    cache_key = f"availability:{date_str}:00:00:23:30:all"
+    if _cache_get(cache_key):
+        return
+    cookies, user_id, _ = _load_session_with_env_fallback()
+    if not cookies:
+        return
+    try:
+        from_sec, to_sec = _hhmm_to_sec("00:00"), _hhmm_to_sec("23:30")
+        results = await asyncio.gather(*[
+            _get_pbp_availability(fid, VENUE_NAMES.get(fid, f"Venue {fid}"), slug, target, from_sec, to_sec)
+            for fid, slug in PBP_SLUG_MAP.items()
+        ], return_exceptions=True)
+        court_blocks_by_id = {r["id"]: r.get("court_blocks", []) for r in results if isinstance(r, dict)}
+        supabase_data = await _read_from_supabase("playbypoint")
+        output = []
+        for r in supabase_data:
+            vid = r.get("id")
+            filtered_sessions = r.get("sessions", [])
+            output.append({"id": vid, "name": r.get("name"), "slug": r.get("slug"), "platform": "playbypoint", "court_blocks": court_blocks_by_id.get(vid, []), "sessions": filtered_sessions, "error": None})
+        response = {"date": date_str, "from": "00:00", "to": "23:30", "venues": output, "total_court_blocks": sum(len(v["court_blocks"]) for v in output), "total_sessions": sum(len(v["sessions"]) for v in output), "source": "live", "cached_count": len(output)}
+        _cache_set(cache_key, response)
+        logger.info(f"Cache warmed for {date_str}: {response['total_court_blocks']} blocks, {response['total_sessions']} sessions")
+    except Exception as e:
+        logger.error(f"Warm error for {target}: {e}")
 
+
+async def _warm_cache():
+    from datetime import date as date_type
+    await asyncio.sleep(5)
+    targets = [date_type.fromordinal(date_type.today().toordinal() + i) for i in range(7)]
+    for t in targets:
+        await _warm_single_date(t)
+        await asyncio.sleep(3)
 
 async def _cache_refresh_loop():
-    """Refresh cache every 4 minutes in the background."""
+    """Refresh cache: 60 min overnight (10pm-6am), 10 min otherwise. Skips :00-:10 on even hours to avoid cron collision."""
+    from datetime import datetime
+    import zoneinfo
+    mel = zoneinfo.ZoneInfo("Australia/Melbourne")
     while True:
-        await asyncio.sleep(240)  # 4 minutes
+        now = datetime.now(mel)
+        if now.minute < 10 and now.hour % 2 == 0:
+            await asyncio.sleep(60)
+            continue
+        interval = 3600 if (now.hour >= 22 or now.hour < 6) else 600
+        await asyncio.sleep(interval)
         await _warm_cache()
 
 
@@ -633,11 +659,8 @@ async def pbp_availability(
     for r in supabase_data:
         vid = r.get("id")
         all_sessions = r.get("sessions", [])
-        filtered_sessions = [
-            s for s in all_sessions
-            if s.get("date") == date_str
-            and (s.get("start", "00:00") == "00:00" or from_sec <= _hhmm_to_sec(s["start"]) < to_sec)
-        ]
+        # Return all dates' sessions, frontend filters by date
+        filtered_sessions = all_sessions
         output.append({
             "id": vid,
             "name": r.get("name"),

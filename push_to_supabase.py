@@ -53,6 +53,7 @@ PBP_SLUG_MAP: dict[int, str] = {
     1487: "Pickle-Playground",
     1664: "TheRallyPickleball",
     1714: "RunwayPickleball",
+    1733: "pickleballpowerhouse"
 }
 
 VENUE_NAMES: dict[int, str] = {
@@ -72,6 +73,7 @@ VENUE_NAMES: dict[int, str] = {
     1487: "Pickle Playground",
     1664: "The Rally Pickleball | Altona",
     1714: "Runway Pickleball",
+    1733: "Pickleball Powerhouse"
 }
 
 
@@ -249,7 +251,7 @@ async def scrape_pbp_venue(
                             "description": desc,
                             "skill_level": sl,
                             "roster": roster,
-                            "lesson_id": lid,
+                            "lesson_id": lid, "program_slug": program_slug,
                         })
                 except Exception as e:
                     console.print(f"    [yellow]clinic {clinic_id} error for {name}: {e}[/yellow]")
