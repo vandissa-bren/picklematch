@@ -50,6 +50,11 @@ VENUE_NAMES = {
     1714: "Runway Pickleball",
 }
 
+# Venues that use non-pickleball surface names for court hire
+VENUE_SURFACES = {
+    1557: ["standard_courts", "championship_courts"],  # Dink & Drive
+}
+
 
 def sec_to_hhmm(sec: int) -> str:
     h = sec // 3600
@@ -57,18 +62,10 @@ def sec_to_hhmm(sec: int) -> str:
     return f"{h:02d}:{m:02d}"
 
 
-async def fetch_court_blocks_for_venue(api, facility_id: int, target_date: date) -> list:
-    blocks = []
+async def fetch_blocks_for_surface(api, facility_id: int, target_date: date, surface: str) -> dict:
+    """Fetch court_slots for one surface type. Returns {court_key: [secs]}"""
+    court_slots = {}
     try:
-        surface = "pickleball"
-        try:
-            ct = await api.court_types(facility_id)
-            ps = [s for s in (ct or []) if "pickle" in (s.get("surface") or "").lower()]
-            if ps:
-                surface = ps[0]["surface"]
-        except Exception:
-            pass
-
         hours_data = await api.available_hours(facility_id, target_date, surface=surface)
         all_slots = (hours_data or {}).get("available_hours", []) if isinstance(hours_data, dict) else []
 
@@ -79,8 +76,6 @@ async def fetch_court_blocks_for_venue(api, facility_id: int, target_date: date)
             and isinstance(s.get("seconds_from_midnight"), (int, float))
         ]
 
-        court_slots: dict[str, list[int]] = {}
-        # Sequential slot fetching with small delay to avoid rate limiting
         for sec in valid_secs:
             try:
                 courts = await api.available_courts(facility_id, target_date, sec, sec + 1800, surface=surface)
@@ -89,30 +84,27 @@ async def fetch_court_blocks_for_venue(api, facility_id: int, target_date: date)
                     cname = court.get("name") or str(cid)
                     key = f"{cid}|{cname}"
                     court_slots.setdefault(key, []).append(sec)
-                await asyncio.sleep(0.3)  # 300ms between slot calls
+                await asyncio.sleep(0.3)
             except Exception as e:
                 print(f"    slot {sec_to_hhmm(sec)} error: {e}")
+    except Exception as e:
+        print(f"    surface {surface} error: {e}")
+    return court_slots
 
-        for court_key, secs in court_slots.items():
-            cname = court_key.split("|", 1)[1]
-            secs_sorted = sorted(set(secs))
-            run_start = run_end = None
-            for s in secs_sorted:
-                if run_start is None:
-                    run_start = run_end = s
-                elif s == run_end + 1800:
-                    run_end = s
-                else:
-                    dur = (run_end - run_start) // 60 + 30
-                    if dur >= 60:
-                        blocks.append({
-                            "court": cname,
-                            "start": sec_to_hhmm(run_start),
-                            "end": sec_to_hhmm(run_end + 1800),
-                            "duration_min": dur,
-                        })
-                    run_start = run_end = s
-            if run_start is not None:
+
+def court_slots_to_blocks(court_slots: dict) -> list:
+    """Convert {court_key: [secs]} to list of bookable blocks >= 60 min."""
+    blocks = []
+    for court_key, secs in court_slots.items():
+        cname = court_key.split("|", 1)[1]
+        secs_sorted = sorted(set(secs))
+        run_start = run_end = None
+        for s in secs_sorted:
+            if run_start is None:
+                run_start = run_end = s
+            elif s == run_end + 1800:
+                run_end = s
+            else:
                 dur = (run_end - run_start) // 60 + 30
                 if dur >= 60:
                     blocks.append({
@@ -121,10 +113,50 @@ async def fetch_court_blocks_for_venue(api, facility_id: int, target_date: date)
                         "end": sec_to_hhmm(run_end + 1800),
                         "duration_min": dur,
                     })
+                run_start = run_end = s
+        if run_start is not None:
+            dur = (run_end - run_start) // 60 + 30
+            if dur >= 60:
+                blocks.append({
+                    "court": cname,
+                    "start": sec_to_hhmm(run_start),
+                    "end": sec_to_hhmm(run_end + 1800),
+                    "duration_min": dur,
+                })
+    return blocks
+
+
+async def fetch_court_blocks_for_venue(api, facility_id: int, target_date: date) -> list:
+    """Fetch available court blocks for one venue on one date."""
+    try:
+        # Check for venue-specific surface override
+        if facility_id in VENUE_SURFACES:
+            surfaces = VENUE_SURFACES[facility_id]
+        else:
+            # Auto-detect pickleball surface
+            surface = "pickleball"
+            try:
+                ct = await api.court_types(facility_id)
+                ps = [s for s in (ct or []) if "pickle" in (s.get("surface") or "").lower()]
+                if ps:
+                    surface = ps[0]["surface"]
+            except Exception:
+                pass
+            surfaces = [surface]
+
+        # Fetch all surfaces and combine
+        combined_slots: dict = {}
+        for surface in surfaces:
+            slots = await fetch_blocks_for_surface(api, facility_id, target_date, surface)
+            for k, v in slots.items():
+                combined_slots.setdefault(k, []).extend(v)
+            await asyncio.sleep(0.5)
+
+        return court_slots_to_blocks(combined_slots)
+
     except Exception as e:
         print(f"  Error fetching {facility_id} for {target_date}: {e}")
-
-    return blocks
+        return []
 
 
 async def main():
@@ -153,10 +185,10 @@ async def main():
                     blocks = await fetch_court_blocks_for_venue(api, fid, target_date)
                     results_by_venue[fid][date_str] = blocks
                     print(f"  {name} {date_str}: {len(blocks)} blocks")
-                    await asyncio.sleep(1)  # 1s between dates per venue
+                    await asyncio.sleep(1)
         except Exception as e:
             print(f"  {name} failed: {e}")
-        await asyncio.sleep(2)  # 2s between venues
+        await asyncio.sleep(2)
 
     # Push to Supabase
     headers = {
