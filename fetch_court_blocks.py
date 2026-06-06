@@ -5,15 +5,12 @@ Run via GitHub Actions every 15 min for today/tomorrow, every 60 min for days 3-
 import asyncio
 import json
 import os
-import sys
 from datetime import date, timedelta
-
-# ── Config ────────────────────────────────────────────────────────────────────
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 PBP_COOKIES_JSON = os.environ["PBP_COOKIES_JSON"]
-DAYS_AHEAD = int(os.environ.get("DAYS_AHEAD", "2"))  # How many days to fetch (2=today+tomorrow, 7=all)
+DAYS_AHEAD = int(os.environ.get("DAYS_AHEAD", "2"))
 
 PBP_SLUG_MAP = {
     597:  "nplpickleball",
@@ -53,7 +50,6 @@ VENUE_NAMES = {
     1714: "Runway Pickleball",
 }
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def sec_to_hhmm(sec: int) -> str:
     h = sec // 3600
@@ -62,7 +58,6 @@ def sec_to_hhmm(sec: int) -> str:
 
 
 async def fetch_court_blocks_for_venue(api, facility_id: int, target_date: date) -> list:
-    """Fetch available court blocks for one venue on one date."""
     blocks = []
     try:
         surface = "pickleball"
@@ -84,22 +79,19 @@ async def fetch_court_blocks_for_venue(api, facility_id: int, target_date: date)
             and isinstance(s.get("seconds_from_midnight"), (int, float))
         ]
 
-        async def fetch_slot(sec):
+        court_slots: dict[str, list[int]] = {}
+        # Sequential slot fetching with small delay to avoid rate limiting
+        for sec in valid_secs:
             try:
                 courts = await api.available_courts(facility_id, target_date, sec, sec + 1800, surface=surface)
-                return sec, courts or []
-            except Exception:
-                return sec, []
-
-        slot_results = await asyncio.gather(*[fetch_slot(s) for s in valid_secs])
-
-        court_slots: dict[str, list[int]] = {}
-        for sec, courts in slot_results:
-            for court in courts:
-                cid = court.get("id") or court.get("name") or "?"
-                cname = court.get("name") or str(cid)
-                key = f"{cid}|{cname}"
-                court_slots.setdefault(key, []).append(sec)
+                for court in (courts or []):
+                    cid = court.get("id") or court.get("name") or "?"
+                    cname = court.get("name") or str(cid)
+                    key = f"{cid}|{cname}"
+                    court_slots.setdefault(key, []).append(sec)
+                await asyncio.sleep(0.3)  # 300ms between slot calls
+            except Exception as e:
+                print(f"    slot {sec_to_hhmm(sec)} error: {e}")
 
         for court_key, secs in court_slots.items():
             cname = court_key.split("|", 1)[1]
@@ -139,7 +131,6 @@ async def main():
     from extract_thejar import PlayByPointAPI
     import httpx
 
-    # Parse cookies
     cookie_data = json.loads(PBP_COOKIES_JSON)
     cookies = cookie_data["cookies"]
     user_id = cookie_data["user_id"]
@@ -147,32 +138,34 @@ async def main():
     today = date.today()
     dates = [today + timedelta(days=i) for i in range(DAYS_AHEAD)]
 
-    print(f"Fetching court blocks for {len(dates)} dates × {len(PBP_SLUG_MAP)} venues...")
+    print(f"Fetching court blocks for {len(dates)} dates x {len(PBP_SLUG_MAP)} venues...")
 
-    # Fetch all venues for all dates
-    results_by_venue = {}  # fid -> {date_str -> [blocks]}
+    results_by_venue = {}
 
     for fid, slug in PBP_SLUG_MAP.items():
+        name = VENUE_NAMES.get(fid, str(fid))
         results_by_venue[fid] = {}
-        async with PlayByPointAPI(cookies=cookies, club_slug=slug) as api:
-            api._user_id = user_id
-            for target_date in dates:
-                date_str = target_date.isoformat()
-                blocks = await fetch_court_blocks_for_venue(api, fid, target_date)
-                results_by_venue[fid][date_str] = blocks
-                print(f"  {VENUE_NAMES.get(fid, fid)} {date_str}: {len(blocks)} blocks")
-                await asyncio.sleep(1)  # Small delay between dates
+        try:
+            async with PlayByPointAPI(cookies=cookies, club_slug=slug) as api:
+                api._user_id = user_id
+                for target_date in dates:
+                    date_str = target_date.isoformat()
+                    blocks = await fetch_court_blocks_for_venue(api, fid, target_date)
+                    results_by_venue[fid][date_str] = blocks
+                    print(f"  {name} {date_str}: {len(blocks)} blocks")
+                    await asyncio.sleep(1)  # 1s between dates per venue
+        except Exception as e:
+            print(f"  {name} failed: {e}")
+        await asyncio.sleep(2)  # 2s between venues
 
-    # Push to Supabase — update by_date field only
+    # Push to Supabase
     headers = {
         "apikey": SUPABASE_KEY,
         "Authorization": f"Bearer {SUPABASE_KEY}",
         "Content-Type": "application/json",
-        "Prefer": "return=minimal",
     }
 
     async with httpx.AsyncClient() as client:
-        # First read existing records
         resp = await client.get(
             f"{SUPABASE_URL}/rest/v1/availability_cache",
             params={"platform": "eq.playbypoint", "select": "id,data"},
@@ -187,20 +180,19 @@ async def main():
             if fid not in results_by_venue:
                 continue
 
-            # Update by_date with new blocks
             by_date = data.get("by_date", {})
             for date_str, blocks in results_by_venue[fid].items():
                 by_date[date_str] = blocks
             data["by_date"] = by_date
 
-            # Upsert back
             await client.patch(
                 f"{SUPABASE_URL}/rest/v1/availability_cache",
                 params={"id": f"eq.{row_id}"},
                 headers=headers,
                 json={"data": data},
             )
-            print(f"  Updated {data.get('name', row_id)} in Supabase")
+            total = sum(len(v) for v in by_date.values())
+            print(f"  Saved {data.get('name', row_id)}: {total} total blocks")
 
     print("Done.")
 
