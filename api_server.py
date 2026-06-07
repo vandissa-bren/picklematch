@@ -125,6 +125,7 @@ app.add_middleware(
 # ── Supabase REST helper ─────────────────────────────────────────────────────
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://stwohmddmdwttasbyblt.supabase.co")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InN0d29obWRkbWR3dHRhc2J5Ymx0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg3MjQ3OTMsImV4cCI6MjA5NDMwMDc5M30.x7VcVmJZ35S1uZy9_SU5RlB_MnuLziX2v81y9l02Yy8")
+SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", SUPABASE_KEY)
 PROXY_URL = os.environ.get("PROXY_URL")  # e.g. http://user:pass@p.webshare.io:80
 
 
@@ -611,21 +612,15 @@ async def pbp_availability(
 
     cookies, user_id, _ = _load_session_with_env_fallback()
 
-    # Fetch court blocks live (fast from DO server)
-    if cookies:
-        results = await asyncio.gather(*[
-            _get_pbp_availability(fid, VENUE_NAMES.get(fid, f"Venue {fid}"), slug, target_date, from_sec, to_sec)
-            for fid, slug in slug_map.items()
-        ], return_exceptions=True)
-        court_blocks_by_id = {}
-        for r in results:
-            if isinstance(r, dict):
-                court_blocks_by_id[r["id"]] = r.get("court_blocks", [])
-    else:
-        court_blocks_by_id = {}
+    # Read court blocks from Supabase by_date (populated by GitHub Actions)
+    court_blocks_by_id = {}
 
     # Fetch sessions from Supabase cache
     supabase_data = await _read_from_supabase("playbypoint")
+    for r in supabase_data:
+        vid = r.get("id")
+        by_date_data = r.get("by_date", {})
+        court_blocks_by_id[vid] = by_date_data.get(date_str, [])
     if ids_filter:
         supabase_data = [r for r in supabase_data if r.get("id") in ids_filter]
 
@@ -1240,3 +1235,120 @@ if __name__ == "__main__":
         reload=False,
         log_level="info",
     )
+
+
+# ─── PBP Account Connect ──────────────────────────────────────────────────────
+
+class ConnectRequest(BaseModel):
+    user_id: str
+    email: str
+    password: str
+
+
+@app.post("/api/pbp/connect")
+async def pbp_connect(req: ConnectRequest):
+    import re
+    from curl_cffi.requests import AsyncSession
+    from playwright.async_api import async_playwright
+
+    try:
+        # Step 1: curl_cffi login
+        session = AsyncSession(impersonate="chrome124")
+        r = await session.get("https://app.playbypoint.com/users/sign_in")
+        csrf_match = re.search(r'<meta name="csrf-token" content="([^"]+)"', r.text)
+        if not csrf_match:
+            raise HTTPException(status_code=500, detail="Could not load PBP login page.")
+        token = csrf_match.group(1)
+        get_cookies = dict(r.cookies)
+
+        r2 = await session.post(
+            "https://app.playbypoint.com/users/sign_in",
+            json={"user": {"email": req.email, "password": req.password, "remember_me": "1"}},
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "X-CSRF-Token": token,
+                "X-Requested-With": "XMLHttpRequest",
+                "Referer": "https://app.playbypoint.com/users/sign_in",
+            },
+            cookies=get_cookies,
+        )
+        resp_json = r2.json() if r2.headers.get("content-type", "").startswith("application/json") else {}
+        if not resp_json.get("success"):
+            raise HTTPException(status_code=401, detail="Invalid PBP email or password.")
+
+        session_cookie = dict(r2.cookies).get("_paybycourt_session") or get_cookies.get("_paybycourt_session")
+        if not session_cookie:
+            raise HTTPException(status_code=401, detail="Login failed — no session cookie returned.")
+
+        # Step 2: Playwright loads home to get user_id
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch(headless=True)
+            context = await browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            )
+            await context.add_cookies([{
+                "name": "_paybycourt_session",
+                "value": session_cookie,
+                "domain": "app.playbypoint.com",
+                "path": "/",
+            }])
+            page = await context.new_page()
+            await page.goto("https://app.playbypoint.com/home", timeout=30000)
+            for _ in range(10):
+                await page.wait_for_timeout(2000)
+                title = (await page.title()).lower()
+                if "just a moment" not in title and "cloudflare" not in title:
+                    break
+            html = await page.content()
+            uid_match = re.search(r'"user_id"\s*:\s*(\d+)', html)
+            pbp_user_id = int(uid_match.group(1)) if uid_match else 0
+            pw_cookies = await context.cookies()
+            all_cookies = {c["name"]: c["value"] for c in pw_cookies}
+            await browser.close()
+
+        # Step 3: Upsert to Supabase
+        from datetime import datetime, timedelta
+        svc_headers = {
+            "apikey": SUPABASE_SERVICE_KEY,
+            "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+            "Content-Type": "application/json",
+            "Prefer": "return=representation",
+        }
+        payload = {
+            "user_id": req.user_id,
+            "pbp_email": req.email,
+            "pbp_cookies": all_cookies,
+            "pbp_user_id": pbp_user_id,
+            "is_connected": True,
+            "last_synced_at": datetime.utcnow().isoformat(),
+            "session_valid_until": (datetime.utcnow() + timedelta(days=30)).isoformat(),
+        }
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            # Try PATCH first
+            resp = await client.patch(
+                f"{SUPABASE_URL}/rest/v1/pbp_credentials?user_id=eq.{req.user_id}",
+                headers=svc_headers,
+                json=payload,
+            )
+            # If no existing row, INSERT
+            if resp.status_code == 200 and resp.json() == []:
+                resp = await client.post(
+                    f"{SUPABASE_URL}/rest/v1/pbp_credentials",
+                    headers={**svc_headers, "Prefer": "return=minimal"},
+                    json=payload,
+                )
+            if resp.status_code not in (200, 201, 204):
+                raise HTTPException(status_code=500, detail=f"Failed to save credentials: {resp.text}")
+
+        return {
+            "success": True,
+            "pbp_email": req.email,
+            "pbp_user_id": pbp_user_id,
+            "message": "PlayByPoint account connected successfully.",
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Connection failed: {e}")
