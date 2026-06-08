@@ -99,7 +99,9 @@ def court_slots_to_blocks(court_slots: dict) -> list:
     """Convert {court_key: [secs]} to list of bookable blocks >= 60 min."""
     blocks = []
     for court_key, secs in court_slots.items():
-        cname = court_key.split("|", 1)[1]
+        parts = court_key.split("|", 1)
+        court_id = parts[0]
+        cname = parts[1] if len(parts) > 1 else court_key
         secs_sorted = sorted(set(secs))
         run_start = run_end = None
         for s in secs_sorted:
@@ -112,8 +114,11 @@ def court_slots_to_blocks(court_slots: dict) -> list:
                 if dur >= 60:
                     blocks.append({
                         "court": cname,
+                        "court_id": court_id,
                         "start": sec_to_hhmm(run_start),
                         "end": sec_to_hhmm(run_end + 1800),
+                        "start_sec": run_start,
+                        "end_sec": run_end + 1800,
                         "duration_min": dur,
                     })
                 run_start = run_end = s
@@ -122,14 +127,48 @@ def court_slots_to_blocks(court_slots: dict) -> list:
             if dur >= 60:
                 blocks.append({
                     "court": cname,
+                    "court_id": court_id,
                     "start": sec_to_hhmm(run_start),
                     "end": sec_to_hhmm(run_end + 1800),
+                    "start_sec": run_start,
+                    "end_sec": run_end + 1800,
                     "duration_min": dur,
                 })
     return blocks
 
 
-async def fetch_court_blocks_for_venue(api, facility_id: int, target_date: date) -> list:
+async def fetch_prices_for_blocks(api, blocks: list, target_date: date, user_id: int) -> list:
+    """Fetch hourly price for each unique court+shift combo. Reuses price if already fetched."""
+    price_cache = {}  # (court_id, start_sec) -> price_per_hour
+    for block in blocks:
+        court_id = block.get("court_id")
+        start_sec = block.get("start_sec")
+        end_sec = block.get("end_sec")
+        if not court_id or start_sec is None or end_sec is None:
+            continue
+        # Use a 1hr window for price lookup (cheapest API call)
+        cache_key = (court_id, start_sec)
+        if cache_key not in price_cache:
+            try:
+                court_id_int = int(court_id)
+                price_data = await api.court_price(
+                    court_id_int, target_date, start_sec, start_sec + 3600, user_id=user_id
+                )
+                fare = (price_data or {}).get("total", {}).get("original_reservation_fare")
+                price_cache[cache_key] = round(float(fare), 2) if fare is not None else None
+                await asyncio.sleep(0.3)
+            except Exception as e:
+                print(f"    price error court={court_id}: {e}")
+                price_cache[cache_key] = None
+        block["price"] = price_cache[cache_key]
+        # Clean up internal fields
+        block.pop("court_id", None)
+        block.pop("start_sec", None)
+        block.pop("end_sec", None)
+    return blocks
+
+
+async def fetch_court_blocks_for_venue(api, facility_id: int, target_date: date, user_id: int) -> list:
     """Fetch available court blocks for one venue on one date."""
     try:
         # Check for venue-specific surface override
@@ -155,7 +194,9 @@ async def fetch_court_blocks_for_venue(api, facility_id: int, target_date: date)
                 combined_slots.setdefault(k, []).extend(v)
             await asyncio.sleep(0.5)
 
-        return court_slots_to_blocks(combined_slots)
+        blocks = court_slots_to_blocks(combined_slots)
+        blocks = await fetch_prices_for_blocks(api, blocks, target_date, user_id)
+        return blocks
 
     except Exception as e:
         print(f"  Error fetching {facility_id} for {target_date}: {e}")
@@ -185,7 +226,7 @@ async def main():
                 api._user_id = user_id
                 for target_date in dates:
                     date_str = target_date.isoformat()
-                    blocks = await fetch_court_blocks_for_venue(api, fid, target_date)
+                    blocks = await fetch_court_blocks_for_venue(api, fid, target_date, user_id)
                     results_by_venue[fid][date_str] = blocks
                     print(f"  {name} {date_str}: {len(blocks)} blocks")
                     await asyncio.sleep(1)
