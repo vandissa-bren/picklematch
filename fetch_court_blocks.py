@@ -1,6 +1,7 @@
 """
 fetch_court_blocks.py — Fetch court availability from PBP and push to Supabase.
 Run via GitHub Actions every 15 min for today/tomorrow, every 60 min for days 3-7.
+Prices are fetched once per court/shift and cached in Supabase — not re-fetched every run.
 """
 import asyncio
 import json
@@ -54,8 +55,8 @@ VENUE_NAMES = {
 
 # Venues that use non-pickleball surface names for court hire
 VENUE_SURFACES = {
-    885: ["pickleball"],  # SportsWell - force pickleball surface
-    1557: ["standard_courts", "championship_courts"],  # Dink & Drive
+    885: ["pickleball"],
+    1557: ["standard_courts", "championship_courts"],
 }
 
 
@@ -63,6 +64,16 @@ def sec_to_hhmm(sec: int) -> str:
     h = sec // 3600
     m = (sec % 3600) // 60
     return f"{h:02d}:{m:02d}"
+
+
+def get_shift(sec: int) -> str:
+    """Derive pricing shift from time of day."""
+    hour = sec // 3600
+    if hour >= 17:
+        return "primetime"
+    elif hour >= 12:
+        return "day"
+    return "lowtime"
 
 
 async def fetch_blocks_for_surface(api, facility_id: int, target_date: date, surface: str) -> dict:
@@ -118,7 +129,6 @@ def court_slots_to_blocks(court_slots: dict) -> list:
                         "start": sec_to_hhmm(run_start),
                         "end": sec_to_hhmm(run_end + 1800),
                         "start_sec": run_start,
-                        "end_sec": run_end + 1800,
                         "duration_min": dur,
                     })
                 run_start = run_end = s
@@ -131,51 +141,68 @@ def court_slots_to_blocks(court_slots: dict) -> list:
                     "start": sec_to_hhmm(run_start),
                     "end": sec_to_hhmm(run_end + 1800),
                     "start_sec": run_start,
-                    "end_sec": run_end + 1800,
                     "duration_min": dur,
                 })
     return blocks
 
 
-async def fetch_prices_for_blocks(api, blocks: list, target_date: date, user_id: int) -> list:
-    """Fetch hourly price for each unique court+shift combo. Reuses price if already fetched."""
-    price_cache = {}  # (court_id, start_sec) -> price_per_hour
+async def fetch_missing_prices(api, blocks: list, target_date: date, user_id: int, existing_prices: dict) -> dict:
+    """
+    Fetch prices only for court/shift combos not already in existing_prices.
+    Returns updated prices dict: {"court_id_shift": price_per_hour}
+    """
+    new_prices = dict(existing_prices)
     for block in blocks:
         court_id = block.get("court_id")
         start_sec = block.get("start_sec")
-        end_sec = block.get("end_sec")
-        if not court_id or start_sec is None or end_sec is None:
+        if not court_id or start_sec is None:
             continue
-        # Use a 1hr window for price lookup (cheapest API call)
-        cache_key = (court_id, start_sec)
-        if cache_key not in price_cache:
-            try:
-                court_id_int = int(court_id)
-                price_data = await api.court_price(
-                    court_id_int, target_date, start_sec, start_sec + 3600, user_id=user_id
-                )
-                fare = (price_data or {}).get("total", {}).get("original_reservation_fare")
-                price_cache[cache_key] = round(float(fare), 2) if fare is not None else None
-                await asyncio.sleep(0.3)
-            except Exception as e:
-                print(f"    price error court={court_id}: {e}")
-                price_cache[cache_key] = None
-        block["price"] = price_cache[cache_key]
-        # Clean up internal fields
-        block.pop("court_id", None)
-        block.pop("start_sec", None)
-        block.pop("end_sec", None)
-    return blocks
+        shift = get_shift(start_sec)
+        cache_key = f"{court_id}_{shift}"
+        if cache_key in new_prices:
+            continue  # Already have this price — skip API call
+        try:
+            price_data = await api.court_price(
+                int(court_id), target_date, start_sec, start_sec + 3600, user_id=user_id
+            )
+            fare = (price_data or {}).get("total", {}).get("original_reservation_fare")
+            new_prices[cache_key] = round(float(fare), 2) if fare is not None else None
+            print(f"    Fetched price {cache_key}: {new_prices[cache_key]}")
+            await asyncio.sleep(0.3)
+        except Exception as e:
+            print(f"    price error {cache_key}: {e}")
+            new_prices[cache_key] = None
+    return new_prices
 
 
-async def fetch_court_blocks_for_venue(api, facility_id: int, target_date: date, user_id: int) -> list:
-    """Fetch available court blocks for one venue on one date."""
+def apply_prices_to_blocks(blocks: list, court_prices: dict) -> list:
+    """Map stored prices onto blocks and clean up internal fields."""
+    result = []
+    for block in blocks:
+        court_id = block.get("court_id")
+        start_sec = block.get("start_sec")
+        shift = get_shift(start_sec) if start_sec is not None else None
+        cache_key = f"{court_id}_{shift}" if court_id and shift else None
+        price = court_prices.get(cache_key) if cache_key else None
+        result.append({
+            "court": block["court"],
+            "start": block["start"],
+            "end": block["end"],
+            "duration_min": block["duration_min"],
+            "price": price,
+        })
+    return result
+
+
+async def fetch_court_blocks_for_venue(api, facility_id: int, target_date: date, user_id: int, existing_prices: dict) -> tuple:
+    """
+    Fetch available court blocks for one venue on one date.
+    Returns (blocks_with_prices, updated_court_prices).
+    """
     try:
-        # Check for venue-specific surface override
         if facility_id in VENUE_SURFACES:
             surfaces = VENUE_SURFACES[facility_id]
         else:
-            # Auto-detect pickleball surface
             surface = "pickleball"
             try:
                 ct = await api.court_types(facility_id)
@@ -186,7 +213,6 @@ async def fetch_court_blocks_for_venue(api, facility_id: int, target_date: date,
                 pass
             surfaces = [surface]
 
-        # Fetch all surfaces and combine
         combined_slots: dict = {}
         for surface in surfaces:
             slots = await fetch_blocks_for_surface(api, facility_id, target_date, surface)
@@ -195,12 +221,13 @@ async def fetch_court_blocks_for_venue(api, facility_id: int, target_date: date,
             await asyncio.sleep(0.5)
 
         blocks = court_slots_to_blocks(combined_slots)
-        blocks = await fetch_prices_for_blocks(api, blocks, target_date, user_id)
-        return blocks
+        updated_prices = await fetch_missing_prices(api, blocks, target_date, user_id, existing_prices)
+        blocks_with_prices = apply_prices_to_blocks(blocks, updated_prices)
+        return blocks_with_prices, updated_prices
 
     except Exception as e:
         print(f"  Error fetching {facility_id} for {target_date}: {e}")
-        return []
+        return [], existing_prices
 
 
 async def main():
@@ -216,25 +243,7 @@ async def main():
 
     print(f"Fetching court blocks for {len(dates)} dates x {len(PBP_SLUG_MAP)} venues...")
 
-    results_by_venue = {}
-
-    for fid, slug in PBP_SLUG_MAP.items():
-        name = VENUE_NAMES.get(fid, str(fid))
-        results_by_venue[fid] = {}
-        try:
-            async with PlayByPointAPI(cookies=cookies, club_slug=slug) as api:
-                api._user_id = user_id
-                for target_date in dates:
-                    date_str = target_date.isoformat()
-                    blocks = await fetch_court_blocks_for_venue(api, fid, target_date, user_id)
-                    results_by_venue[fid][date_str] = blocks
-                    print(f"  {name} {date_str}: {len(blocks)} blocks")
-                    await asyncio.sleep(1)
-        except Exception as e:
-            print(f"  {name} failed: {e}")
-        await asyncio.sleep(2)
-
-    # Push to Supabase
+    # Load existing Supabase records first
     headers = {
         "apikey": SUPABASE_KEY,
         "Authorization": f"Bearer {SUPABASE_KEY}",
@@ -249,6 +258,43 @@ async def main():
         )
         records = resp.json()
 
+    # Build lookup: facility_id -> record
+    records_by_fid = {}
+    for record in records:
+        fid = record["data"].get("id")
+        if fid:
+            records_by_fid[fid] = record
+
+    results_by_venue = {}
+
+    for fid, slug in PBP_SLUG_MAP.items():
+        name = VENUE_NAMES.get(fid, str(fid))
+        results_by_venue[fid] = {"by_date": {}, "court_prices": {}}
+
+        # Load existing prices from Supabase
+        existing_record = records_by_fid.get(fid, {})
+        existing_data = existing_record.get("data", {})
+        existing_prices = existing_data.get("court_prices", {})
+
+        try:
+            async with PlayByPointAPI(cookies=cookies, club_slug=slug) as api:
+                api._user_id = user_id
+                updated_prices = existing_prices.copy()
+                for target_date in dates:
+                    date_str = target_date.isoformat()
+                    blocks, updated_prices = await fetch_court_blocks_for_venue(
+                        api, fid, target_date, user_id, updated_prices
+                    )
+                    results_by_venue[fid]["by_date"][date_str] = blocks
+                    results_by_venue[fid]["court_prices"] = updated_prices
+                    print(f"  {name} {date_str}: {len(blocks)} blocks")
+                    await asyncio.sleep(1)
+        except Exception as e:
+            print(f"  {name} failed: {e}")
+        await asyncio.sleep(2)
+
+    # Push to Supabase
+    async with httpx.AsyncClient() as client:
         for record in records:
             row_id = record["id"]
             data = record["data"]
@@ -257,9 +303,10 @@ async def main():
                 continue
 
             by_date = data.get("by_date", {})
-            for date_str, blocks in results_by_venue[fid].items():
+            for date_str, blocks in results_by_venue[fid]["by_date"].items():
                 by_date[date_str] = blocks
             data["by_date"] = by_date
+            data["court_prices"] = results_by_venue[fid]["court_prices"]
 
             await client.patch(
                 f"{SUPABASE_URL}/rest/v1/availability_cache",
@@ -268,7 +315,8 @@ async def main():
                 json={"data": data},
             )
             total = sum(len(v) for v in by_date.values())
-            print(f"  Saved {data.get('name', row_id)}: {total} total blocks")
+            n_prices = len(results_by_venue[fid]["court_prices"])
+            print(f"  Saved {data.get('name', row_id)}: {total} total blocks, {n_prices} prices cached")
 
     print("Done.")
 
