@@ -308,7 +308,6 @@ async def scrape_sportlogic(dates: list[date]) -> list[dict]:
 
 async def run_once():
     console.print(f"\n[bold]🏓 PickleMatch → Supabase sync[/bold] · {datetime.now().strftime('%H:%M:%S')}\n")
-
     dates = [date.today() + timedelta(days=i) for i in range(DAYS_AHEAD)]
     cookies, user_id = _load_cookies()
 
@@ -317,17 +316,35 @@ async def run_once():
         console.print("[red]No PBP cookies. Run refresh_cookies.py first.[/red]")
     else:
         console.print(f"Scraping {len(PBP_SLUG_MAP)} PBP venues × {DAYS_AHEAD} days…")
+
+        # Fetch existing Supabase data first to preserve by_date/court_prices
+        existing_records = {}
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            existing_resp = await client.get(
+                f"{SUPABASE_URL}/rest/v1/availability_cache",
+                params={"platform": "eq.playbypoint", "select": "id,data"},
+                headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"},
+            )
+            for row in existing_resp.json():
+                existing_records[row["id"]] = row["data"]
+
         pbp_results = []
         for fid, slug in PBP_SLUG_MAP.items():
             r = await scrape_pbp_venue(cookies, user_id, fid, VENUE_NAMES.get(fid, f"Venue {fid}"), slug, dates)
             pbp_results.append(r)
+            await asyncio.sleep(3)
 
         records = []
         for r in pbp_results:
             if not isinstance(r, dict):
                 continue
+            rec_id = f"pbp-{r['id']}"
+            existing = existing_records.get(rec_id, {})
+            # Preserve court blocks and prices from previous court blocks run
+            r["by_date"] = existing.get("by_date", {})
+            r["court_prices"] = existing.get("court_prices", {})
             records.append({
-                "id": f"pbp-{r['id']}",
+                "id": rec_id,
                 "venue_name": VENUE_NAMES.get(r["id"], r["name"]),
                 "platform": "playbypoint",
                 "date": date.today().isoformat(),
@@ -370,8 +387,6 @@ async def run_once():
         console.print(f"[green]✓ Pushed {len(sl_results)} SportLogic venues[/green]\n")
 
     console.print(f"Sync complete · {datetime.now().strftime('%H:%M:%S')}")
-
-
 async def watch(interval_minutes: int = 60):
     while True:
         await run_once()
