@@ -253,7 +253,9 @@ async def scrape_pbp_venue(
                             "description": desc,
                             "skill_level": sl,
                             "roster": roster,
-                            "lesson_id": lid, "program_slug": program_slug,
+                            "lesson_id": lid, 
+                            "program_slug": program_slug,
+                            "clinic_id": clinic_id,
                         })
                 except Exception as e:
                     console.print(f"    [yellow]clinic {clinic_id} error for {name}: {e}[/yellow]")
