@@ -53,7 +53,7 @@ PBP_SLUG_MAP: dict[int, str] = {
     1487: "Pickle-Playground",
     1664: "TheRallyPickleball",
     1714: "RunwayPickleball",
-    1733: "pickleballpowerhouse"
+    1733: "pickleballpowerhouse",
     1770: "rayapickleballclub",
 }
 
@@ -74,7 +74,7 @@ VENUE_NAMES: dict[int, str] = {
     1487: "Pickle Playground",
     1664: "The Rally Pickleball | Altona",
     1714: "Runway Pickleball",
-    1733: "Pickleball Powerhouse"
+    1733: "Pickleball Powerhouse",
     1770: "Raya Pickleball Club",
 }
 
