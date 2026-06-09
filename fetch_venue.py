@@ -17,12 +17,16 @@ except ImportError:
     pass
 
 from push_to_supabase import (
-    scrape_pbp_venue, supabase_upsert,
+    scrape_pbp_venue,
     PBP_SLUG_MAP, VENUE_NAMES, DAYS_AHEAD,
-    _load_cookies, SUPABASE_URL, SUPABASE_KEY
+    _load_cookies, SUPABASE_URL,
 )
 
 console = Console()
+
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
+SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", SUPABASE_KEY)
+
 
 async def main():
     facility_id = int(os.environ.get("FACILITY_ID", "0"))
@@ -41,12 +45,16 @@ async def main():
 
     console.print(f"Scraping {name} ({facility_id})…")
 
-    # Fetch existing data to preserve by_date/court_prices/other venue sessions
+    # Fetch existing data to preserve by_date/court_prices
+    read_headers = {
+        "apikey": SUPABASE_SERVICE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+    }
     async with httpx.AsyncClient(timeout=30.0) as client:
         existing_resp = await client.get(
             f"{SUPABASE_URL}/rest/v1/availability_cache",
             params={"platform": "eq.playbypoint", "select": "id,data"},
-            headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"},
+            headers=read_headers,
         )
         existing_records = {row["id"]: row["data"] for row in existing_resp.json()}
 
@@ -58,6 +66,8 @@ async def main():
 
     rec_id = f"pbp-{facility_id}"
     existing = existing_records.get(rec_id, {})
+
+    # Preserve court blocks and prices
     r["by_date"] = existing.get("by_date", {})
     r["court_prices"] = existing.get("court_prices", {})
 
@@ -74,9 +84,24 @@ async def main():
         "updated_at": datetime.utcnow().isoformat(),
     }]
 
-    await supabase_upsert(record)
-    console.print(f"[green]✓ {name}: {len(r['sessions'])} sessions pushed[/green]")
-    console.print(f"[green]✓ {name}: {len(r['sessions'])} sessions pushed[/green]")
+    # Write with service key
+    write_headers = {
+        "apikey": SUPABASE_SERVICE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+        "Content-Type": "application/json",
+        "Prefer": "resolution=merge-duplicates",
+    }
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.post(
+            f"{SUPABASE_URL}/rest/v1/availability_cache",
+            json=record,
+            headers=write_headers,
+        )
+        if resp.status_code in (200, 201):
+            console.print(f"[green]✓ {name}: {len(r['sessions'])} sessions written to Supabase[/green]")
+        else:
+            console.print(f"[red]Supabase error {resp.status_code}: {resp.text[:200]}[/red]")
+
 
 if __name__ == "__main__":
     asyncio.run(main())
