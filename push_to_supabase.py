@@ -332,6 +332,7 @@ async def run_once():
         for fid, slug in PBP_SLUG_MAP.items():
             r = await scrape_pbp_venue(cookies, user_id, fid, VENUE_NAMES.get(fid, f"Venue {fid}"), slug, dates)
             pbp_results.append(r)
+            await asyncio.sleep(3)
 
         records = []
         for r in pbp_results:
