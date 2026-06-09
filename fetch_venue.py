@@ -76,6 +76,7 @@ async def main():
 
     await supabase_upsert(record)
     console.print(f"[green]✓ {name}: {len(r['sessions'])} sessions pushed[/green]")
+    console.print(f"[green]✓ {name}: {len(r['sessions'])} sessions pushed[/green]")
 
 if __name__ == "__main__":
     asyncio.run(main())
