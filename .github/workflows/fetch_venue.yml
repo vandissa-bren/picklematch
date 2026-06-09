@@ -23,6 +23,7 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           PBP_COOKIES_JSON: ${{ secrets.PBP_COOKIES_JSON }}
           FACILITY_ID: ${{ inputs.facility_id }}
         run: |
