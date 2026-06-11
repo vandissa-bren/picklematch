@@ -297,19 +297,17 @@ async def main():
 
     # Push to Supabase
     async with httpx.AsyncClient() as client:
-        for record in records:
+        async def patch_venue(record):
             row_id = record["id"]
             data = record["data"]
             fid = data.get("id")
             if fid not in results_by_venue:
-                continue
-
+                return
             by_date = data.get("by_date", {})
             for date_str, blocks in results_by_venue[fid]["by_date"].items():
                 by_date[date_str] = blocks
             data["by_date"] = by_date
             data["court_prices"] = results_by_venue[fid]["court_prices"]
-
             await client.patch(
                 f"{SUPABASE_URL}/rest/v1/availability_cache",
                 params={"id": f"eq.{row_id}"},
@@ -319,6 +317,8 @@ async def main():
             total = sum(len(v) for v in by_date.values())
             n_prices = len(results_by_venue[fid]["court_prices"])
             print(f"  Saved {data.get('name', row_id)}: {total} total blocks, {n_prices} prices cached")
+
+        await asyncio.gather(*[patch_venue(record) for record in records])
 
     print("Done.")
 
