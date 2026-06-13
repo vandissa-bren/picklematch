@@ -131,9 +131,8 @@ async def get_member_price(cookies: dict, court_id: int, pbp_user_id: int,
 async def fetch_member_prices_for_venue(venue: dict, cookies: dict, pbp_user_id: int) -> dict:
     """
     Returns member_court_prices dict: {"court_id_shift": price}
-    Only fetches prices not already cached.
+    Uses known court IDs from existing court_prices in Supabase — avoids available_courts call.
     """
-    # Load existing member prices from Supabase
     async with httpx.AsyncClient() as client:
         r = await client.get(
             f"{SUPABASE_URL}/rest/v1/availability_cache",
@@ -144,42 +143,40 @@ async def fetch_member_prices_for_venue(venue: dict, cookies: dict, pbp_user_id:
 
     existing_data = records[0]["data"] if records else {}
     member_prices = dict(existing_data.get("member_court_prices", {}))
+    court_prices = existing_data.get("court_prices", {})
     print(f"  Existing member prices cached: {len(member_prices)}")
 
-    dates = [date(2026, 6, 15)]  # test: Monday June 15
+    # Extract unique court_id+shift combos from existing court_prices
+    # Keys are like "15020_day", "15020_primetime" etc.
+    combos = {}
+    for key in court_prices:
+        parts = key.rsplit("_", 1)
+        if len(parts) == 2:
+            court_id, shift = parts
+            combos.setdefault(court_id, set()).add(shift)
 
-    # Sample times across all shifts: 8am (lowtime), 11am (day), 6pm (primetime)
-    sample_times = [8 * 3600, 11 * 3600, 18 * 3600]
+    print(f"  Court/shift combos to fetch: {sum(len(v) for v in combos.values())}")
 
-    for target_date in dates:
-        for surface in venue["surfaces"]:
-            for target_sec in sample_times:
-                print(f"    Checking {target_date} {surface} {target_sec//3600}:00")
-                shift = get_shift(target_sec)
-                courts = await get_available_courts(cookies, venue["facility_id"],
-                                                    surface, target_date, target_sec)
-                if not courts:
-                    continue
+    # Use tomorrow as target date
+    target_date = date.today() + timedelta(days=1)
+    shift_times = {"lowtime": 8 * 3600, "day": 11 * 3600, "primetime": 18 * 3600}
 
-                for court in courts[:2]:  # sample first 2 courts per surface
-                    court_id = court.get("id")
-                    if not court_id:
-                        continue
-                    cache_key = f"{court_id}_{shift}"
-                    if cache_key in member_prices:
-                        continue  # already cached
-
-                    price = await get_member_price(
-                        cookies, court_id, pbp_user_id,
-                        venue["slug"], target_date, target_sec
-                    )
-                    if price is not None:
-                        member_prices[cache_key] = price
-                    await asyncio.sleep(0.3)
-            await asyncio.sleep(0.5)
+    for court_id, shifts in combos.items():
+        for shift in shifts:
+            cache_key = f"{court_id}_{shift}"
+            if cache_key in member_prices:
+                print(f"    {cache_key}: already cached (${member_prices[cache_key]})")
+                continue
+            target_sec = shift_times.get(shift, 11 * 3600)
+            price = await get_member_price(
+                cookies, int(court_id), pbp_user_id,
+                venue["slug"], target_date, target_sec
+            )
+            if price is not None:
+                member_prices[cache_key] = price
+            await asyncio.sleep(0.4)
 
     return member_prices
-
 
 async def main():
     print(f"Fetching member court prices for {len(MEMBER_VENUES)} venue(s)...")
