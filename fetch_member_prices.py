@@ -13,6 +13,7 @@ import time
 from datetime import date, timedelta
 
 import httpx
+from curl_cffi.requests import AsyncSession
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
@@ -72,7 +73,7 @@ async def get_credentials(supabase_user_id: str, client: httpx.AsyncClient):
 async def get_available_courts(cookies: dict, facility_id: int, surface: str,
                                 target_date: date, target_sec: int) -> list:
     date_ts = int(time.mktime(target_date.timetuple()))
-    async with httpx.AsyncClient(cookies=cookies, headers=PBP_HEADERS) as client:
+    async with AsyncSession(impersonate="chrome", cookies=cookies) as client:
         r = await client.get(
             f"https://app.playbypoint.com/api/facilities/{facility_id}/available_courts",
             params={
@@ -82,6 +83,7 @@ async def get_available_courts(cookies: dict, facility_id: int, surface: str,
                 "hour_end": target_sec + 3600,
                 "kind": "reservation",
             },
+            headers=PBP_HEADERS,
             timeout=10,
         )
         if r.status_code == 200:
@@ -96,7 +98,7 @@ async def get_member_price(cookies: dict, court_id: int, pbp_user_id: int,
                             slug: str, target_date: date, target_sec: int) -> float | None:
     date_ts = int(time.mktime(target_date.timetuple()))
     headers = {**PBP_HEADERS, "Referer": f"https://app.playbypoint.com/book/{slug}"}
-    async with httpx.AsyncClient(cookies=cookies, headers=headers) as client:
+    async with AsyncSession(impersonate="chrome", cookies=cookies) as client:
         r = await client.get(
             f"https://app.playbypoint.com/api/courts/{court_id}/price",
             params={
