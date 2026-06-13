@@ -1,10 +1,12 @@
-name: Test Member Court Prices
+name: Fetch Member Court Prices
 
 on:
-  workflow_dispatch:  # manual only
+  workflow_dispatch:
+  schedule:
+    - cron: '0 */6 * * *'  # every 6 hours
 
 jobs:
-  test:
+  fetch:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -17,9 +19,9 @@ jobs:
       - name: Install dependencies
         run: pip install httpx
 
-      - name: Test member prices
+      - name: Fetch member prices
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           ESTA_SUPABASE_USER_ID: ${{ secrets.ESTA_SUPABASE_USER_ID }}
-        run: python test_member_prices.py
+        run: python fetch_member_prices.py
