@@ -22,5 +22,4 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           ESTA_SUPABASE_USER_ID: ${{ secrets.ESTA_SUPABASE_USER_ID }}
-          BLAKE_SUPABASE_USER_ID: ${{ secrets.BLAKE_SUPABASE_USER_ID }}
         run: python test_member_prices.py
