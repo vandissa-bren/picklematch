@@ -48,7 +48,10 @@ async def get_credentials(supabase_user_id: str):
             params={"user_id": f"eq.{supabase_user_id}", "select": "pbp_cookies,pbp_user_id"},
             headers=SB_HEADERS,
         )
-        row = r.json()[0]
+        print(f"  Supabase status: {r.status_code}")
+        resp = r.json()
+        print(f"  Response: {str(resp)[:300]}")
+        row = resp[0]
         cookies_raw = row["pbp_cookies"]
         pbp_user_id = row["pbp_user_id"]
         if isinstance(cookies_raw, str):
