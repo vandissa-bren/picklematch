@@ -2,6 +2,7 @@
 test_member_prices.py
 Manual test: compare member vs non-member court hire prices.
 Run via GitHub Actions (workflow_dispatch only) — no writes to Supabase.
+Uses Esta's cookies for all requests, but passes Blake's pbp_user_id for non-member price.
 """
 import asyncio
 import json
@@ -12,8 +13,9 @@ from datetime import date, timedelta
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]
-ESTA_SUPABASE_USER_ID  = os.environ["ESTA_SUPABASE_USER_ID"]
-BLAKE_SUPABASE_USER_ID = os.environ["BLAKE_SUPABASE_USER_ID"]
+ESTA_SUPABASE_USER_ID = os.environ["ESTA_SUPABASE_USER_ID"]
+
+BLAKE_PBP_USER_ID = 1973346  # non-member, hardcoded
 
 SB_HEADERS = {
     "apikey": SUPABASE_KEY,
@@ -31,11 +33,11 @@ TARGET_DATE = date.today() + timedelta(days=2)
 TARGET_SEC  = 10 * 3600  # 10:00 AM
 
 VENUES = [
-    {"name": "Dink & Drive",     "facility_id": 1557, "surfaces": ["standard_courts", "championship_courts"]},
-    {"name": "The Real Dill",    "facility_id": 1461, "surfaces": ["pickleball"]},
-    {"name": "PicklePlex",       "facility_id": 1532, "surfaces": ["pickleball"]},
-    {"name": "Pickle Playground","facility_id": 1487, "surfaces": ["pickleball"]},
-    {"name": "The Rally",        "facility_id": 1664, "surfaces": ["pickleball"]},
+    {"name": "Dink & Drive",      "facility_id": 1557, "surfaces": ["standard_courts", "championship_courts"]},
+    {"name": "The Real Dill",     "facility_id": 1461, "surfaces": ["pickleball"]},
+    {"name": "PicklePlex",        "facility_id": 1532, "surfaces": ["pickleball"]},
+    {"name": "Pickle Playground", "facility_id": 1487, "surfaces": ["pickleball"]},
+    {"name": "The Rally",         "facility_id": 1664, "surfaces": ["pickleball"]},
 ]
 
 
@@ -97,6 +99,7 @@ async def get_court_price(cookies: dict, court_id: int, pbp_user_id: int) -> flo
             data = r.json()
             fare = (data.get("total") or {}).get("original_reservation_fare")
             return float(fare) if fare is not None else None
+        print(f"    price status: {r.status_code}")
         return None
 
 
@@ -104,11 +107,10 @@ async def main():
     print(f"Testing member vs non-member court prices on {TARGET_DATE} at 10:00 AM")
     print("=" * 60)
 
-    print("Fetching credentials...")
-    blake_cookies, blake_pbp_id = await get_credentials(BLAKE_SUPABASE_USER_ID)
-    esta_cookies,  esta_pbp_id  = await get_credentials(ESTA_SUPABASE_USER_ID)
-    print(f"Blake: pbp_user_id={blake_pbp_id}, cookies={len(blake_cookies)}")
-    print(f"Esta:  pbp_user_id={esta_pbp_id},  cookies={len(esta_cookies)}")
+    print("Fetching Esta's credentials...")
+    esta_cookies, esta_pbp_id = await get_credentials(ESTA_SUPABASE_USER_ID)
+    print(f"Esta:  pbp_user_id={esta_pbp_id}, cookies={len(esta_cookies)}")
+    print(f"Blake: pbp_user_id={BLAKE_PBP_USER_ID} (hardcoded, non-member)")
     print()
 
     any_difference = False
@@ -130,12 +132,13 @@ async def main():
             court_id = court.get("id")
             court_name = court.get("name", str(court_id))
 
-            blake_price = await get_court_price(blake_cookies, court_id, blake_pbp_id)
-            esta_price  = await get_court_price(esta_cookies,  court_id, esta_pbp_id)
+            # Use Esta's cookies for both calls — only user_id param differs
+            blake_price = await get_court_price(esta_cookies, court_id, BLAKE_PBP_USER_ID)
+            esta_price  = await get_court_price(esta_cookies, court_id, esta_pbp_id)
 
             print(f"  Court: {court_name} (id={court_id})")
-            print(f"    Blake (non-member): ${blake_price}")
-            print(f"    Esta  (member):     ${esta_price}")
+            print(f"    Non-member (user_id={BLAKE_PBP_USER_ID}): ${blake_price}")
+            print(f"    Member     (user_id={esta_pbp_id}):  ${esta_price}")
 
             if blake_price is not None and esta_price is not None:
                 diff = blake_price - esta_price
