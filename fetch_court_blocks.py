@@ -6,7 +6,8 @@ Prices are fetched once per court/shift and cached in Supabase — not re-fetche
 import asyncio
 import json
 import os
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime
+from zoneinfo import ZoneInfo
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]
@@ -250,7 +251,7 @@ async def main():
     cookies = cookie_data["cookies"]
     user_id = cookie_data["user_id"]
 
-    today = date.today()
+    today = datetime.now(ZoneInfo('Australia/Melbourne')).date()
     dates = [today + timedelta(days=i) for i in range(DAYS_AHEAD)]
 
     print(f"Fetching court blocks for {len(dates)} dates x {len(PBP_SLUG_MAP)} venues...")
