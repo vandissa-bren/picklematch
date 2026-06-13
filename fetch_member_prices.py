@@ -125,6 +125,7 @@ async def get_member_price(cookies: dict, court_id: int, pbp_user_id: int,
             price = round(float(fare), 2) if fare is not None else None
             print(f"      court {court_id} shift — affiliation: {affiliation}, price: ${price}")
             return price
+        print(f"    price endpoint status: {r.status_code} body: {r.text[:300]}")
         return None
 
 
