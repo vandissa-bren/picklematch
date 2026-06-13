@@ -154,6 +154,7 @@ async def fetch_member_prices_for_venue(venue: dict, cookies: dict, pbp_user_id:
     for target_date in dates:
         for surface in venue["surfaces"]:
             for target_sec in sample_times:
+                print(f"    Checking {target_date} {surface} {target_sec//3600}:00")
                 shift = get_shift(target_sec)
                 courts = await get_available_courts(cookies, venue["facility_id"],
                                                     surface, target_date, target_sec)
