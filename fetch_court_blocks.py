@@ -170,8 +170,16 @@ async def fetch_missing_prices(api, blocks: list, target_date: date, user_id: in
                 int(court_id), target_date, start_sec, start_sec + 3600, user_id=user_id
             )
             fare = (price_data or {}).get("total", {}).get("original_reservation_fare")
-            new_prices[cache_key] = round(float(fare), 2) if fare is not None else None
-            print(f"    Fetched price {cache_key}: {new_prices[cache_key]}")
+            price = round(float(fare), 2) if fare is not None else None
+            # Use PBP's actual shift name if available
+            try:
+                pbp_shift = price_data["prices_per_user"][0]["price"]["shift_prices"][0]["shift"]
+                pbp_key = f"{court_id}_{pbp_shift}"
+                new_prices[pbp_key] = price
+                print(f"    Fetched price {pbp_key} (pbp shift): {price}")
+            except (KeyError, IndexError, TypeError):
+                new_prices[cache_key] = price
+                print(f"    Fetched price {cache_key}: {price}")
             await asyncio.sleep(0.3)
         except Exception as e:
             print(f"    price error {cache_key}: {e}")
