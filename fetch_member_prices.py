@@ -85,7 +85,10 @@ async def get_available_courts(cookies: dict, facility_id: int, surface: str,
             timeout=10,
         )
         if r.status_code == 200:
-            return r.json() or []
+            result = r.json() or []
+            print(f"      available_courts [{surface}] {target_date} {target_sec//3600}:00 -> {len(result)} courts")
+            return result
+        print(f"      available_courts [{surface}] {target_date} {target_sec//3600}:00 -> status {r.status_code}")
         return []
 
 
@@ -143,11 +146,10 @@ async def fetch_member_prices_for_venue(venue: dict, cookies: dict, pbp_user_id:
     member_prices = dict(existing_data.get("member_court_prices", {}))
     print(f"  Existing member prices cached: {len(member_prices)}")
 
-    today = date.today()
-    dates = [today + timedelta(days=i) for i in range(DAYS_AHEAD)]
+    dates = [date(2026, 6, 15)]  # test: Monday June 15
 
-    # Sample times across all shifts: 8am (lowtime), 1pm (day), 6pm (primetime)
-    sample_times = [8 * 3600, 13 * 3600, 18 * 3600]
+    # Sample times across all shifts: 8am (lowtime), 11am (day), 6pm (primetime)
+    sample_times = [8 * 3600, 11 * 3600, 18 * 3600]
 
     for target_date in dates:
         for surface in venue["surfaces"]:
