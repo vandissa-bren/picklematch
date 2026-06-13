@@ -1,8 +1,6 @@
 """
-test_member_prices.py
-Manual test: compare member vs non-member court hire prices.
-Run via GitHub Actions (workflow_dispatch only) — no writes to Supabase.
-Uses Esta's cookies for all requests, but passes Blake's pbp_user_id for non-member price.
+test_member_prices.py — Manual test only, no writes to Supabase.
+Compares member vs non-member court hire prices using Esta's session.
 """
 import asyncio
 import json
@@ -14,14 +12,13 @@ from datetime import date, timedelta
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 ESTA_SUPABASE_USER_ID = os.environ["ESTA_SUPABASE_USER_ID"]
-
-BLAKE_PBP_USER_ID = 1973346  # non-member, hardcoded
+ESTA_PBP_USER_ID = 1742850   # member
+BLAKE_PBP_USER_ID = 1973346  # non-member
 
 SB_HEADERS = {
     "apikey": SUPABASE_KEY,
     "Authorization": f"Bearer {SUPABASE_KEY}",
 }
-
 PBP_HEADERS = {
     "Accept": "application/json",
     "Referer": "https://app.playbypoint.com",
@@ -41,26 +38,23 @@ VENUES = [
 ]
 
 
-async def get_credentials(supabase_user_id: str):
+async def get_esta_cookies() -> dict:
+    url = f"{SUPABASE_URL}/rest/v1/pbp_credentials"
+    params = {"user_id": f"eq.{ESTA_SUPABASE_USER_ID}", "select": "pbp_cookies"}
     async with httpx.AsyncClient() as client:
-        r = await client.get(
-            f"{SUPABASE_URL}/rest/v1/pbp_credentials",
-            params={"user_id": f"eq.{supabase_user_id}", "select": "pbp_cookies,pbp_user_id"},
-            headers=SB_HEADERS,
-        )
-        print(f"  Supabase status: {r.status_code}")
-        resp = r.json()
-        print(f"  Response: {str(resp)[:300]}")
-        row = resp[0]
-        cookies_raw = row["pbp_cookies"]
-        pbp_user_id = row["pbp_user_id"]
+        r = await client.get(url, params=params, headers=SB_HEADERS)
+        print(f"Supabase status: {r.status_code}")
+        body = r.text
+        print(f"Supabase body: {body[:400]}")
+        data = r.json()
+        if not data:
+            raise ValueError(f"No pbp_credentials row found for user {ESTA_SUPABASE_USER_ID}")
+        cookies_raw = data[0]["pbp_cookies"]
         if isinstance(cookies_raw, str):
             cookies_raw = json.loads(cookies_raw)
         if isinstance(cookies_raw, list):
-            cookies = {c["name"]: c["value"] for c in cookies_raw}
-        else:
-            cookies = cookies_raw
-        return cookies, int(pbp_user_id)
+            return {c["name"]: c["value"] for c in cookies_raw}
+        return cookies_raw  # already a dict
 
 
 async def get_available_courts(cookies: dict, facility_id: int, surface: str) -> list:
@@ -68,17 +62,13 @@ async def get_available_courts(cookies: dict, facility_id: int, surface: str) ->
     async with httpx.AsyncClient(cookies=cookies, headers=PBP_HEADERS) as client:
         r = await client.get(
             f"https://app.playbypoint.com/api/facilities/{facility_id}/available_courts",
-            params={
-                "date": date_ts,
-                "surface": surface,
-                "start_hour": TARGET_SEC,
-                "hour_end": TARGET_SEC + 3600,
-                "kind": "reservation",
-            },
+            params={"date": date_ts, "surface": surface, "start_hour": TARGET_SEC,
+                    "hour_end": TARGET_SEC + 3600, "kind": "reservation"},
             timeout=10,
         )
         if r.status_code == 200:
             return r.json() or []
+        print(f"    available_courts {surface}: {r.status_code}")
         return []
 
 
@@ -87,15 +77,9 @@ async def get_court_price(cookies: dict, court_id: int, pbp_user_id: int) -> flo
     async with httpx.AsyncClient(cookies=cookies, headers=PBP_HEADERS) as client:
         r = await client.get(
             f"https://app.playbypoint.com/api/courts/{court_id}/price",
-            params={
-                "date": date_ts,
-                "admin_book": "false",
-                "hour_start": TARGET_SEC,
-                "hour_end": TARGET_SEC + 3600,
-                "players": "reservation_type_1",
-                "payment_method": "credit_card",
-                "user_id": pbp_user_id,
-            },
+            params={"date": date_ts, "admin_book": "false", "hour_start": TARGET_SEC,
+                    "hour_end": TARGET_SEC + 3600, "players": "reservation_type_1",
+                    "payment_method": "credit_card", "user_id": pbp_user_id},
             timeout=10,
         )
         if r.status_code == 200:
@@ -107,14 +91,11 @@ async def get_court_price(cookies: dict, court_id: int, pbp_user_id: int) -> flo
 
 
 async def main():
-    print(f"Testing member vs non-member court prices on {TARGET_DATE} at 10:00 AM")
+    print(f"Member vs non-member court prices on {TARGET_DATE} at 10:00 AM")
     print("=" * 60)
 
-    print("Fetching Esta's credentials...")
-    esta_cookies, esta_pbp_id = await get_credentials(ESTA_SUPABASE_USER_ID)
-    print(f"Esta:  pbp_user_id={esta_pbp_id}, cookies={len(esta_cookies)}")
-    print(f"Blake: pbp_user_id={BLAKE_PBP_USER_ID} (hardcoded, non-member)")
-    print()
+    cookies = await get_esta_cookies()
+    print(f"Got {len(cookies)} cookies for Esta\n")
 
     any_difference = False
 
@@ -122,46 +103,38 @@ async def main():
         print(f"── {venue['name']} (facility_id={venue['facility_id']}) ──")
         courts = []
         for surface in venue["surfaces"]:
-            courts = await get_available_courts(esta_cookies, venue["facility_id"], surface)
+            courts = await get_available_courts(cookies, venue["facility_id"], surface)
             if courts:
-                print(f"  Surface: {surface}, courts found: {len(courts)}")
+                print(f"  Surface: {surface}, courts: {len(courts)}")
                 break
         if not courts:
-            print(f"  No courts available on {TARGET_DATE} at 10:00 AM")
+            print(f"  No courts available")
             print()
             continue
 
-        for court in courts[:2]:  # check first 2 courts per venue
+        for court in courts[:2]:
             court_id = court.get("id")
             court_name = court.get("name", str(court_id))
-
-            # Use Esta's cookies for both calls — only user_id param differs
-            blake_price = await get_court_price(esta_cookies, court_id, BLAKE_PBP_USER_ID)
-            esta_price  = await get_court_price(esta_cookies, court_id, esta_pbp_id)
-
-            print(f"  Court: {court_name} (id={court_id})")
-            print(f"    Non-member (user_id={BLAKE_PBP_USER_ID}): ${blake_price}")
-            print(f"    Member     (user_id={esta_pbp_id}):  ${esta_price}")
-
-            if blake_price is not None and esta_price is not None:
-                diff = blake_price - esta_price
+            non_member_price = await get_court_price(cookies, court_id, BLAKE_PBP_USER_ID)
+            member_price     = await get_court_price(cookies, court_id, ESTA_PBP_USER_ID)
+            print(f"  {court_name} (id={court_id})")
+            print(f"    Non-member (user_id={BLAKE_PBP_USER_ID}): ${non_member_price}")
+            print(f"    Member     (user_id={ESTA_PBP_USER_ID}):  ${member_price}")
+            if non_member_price is not None and member_price is not None:
+                diff = non_member_price - member_price
                 if diff > 0.01:
                     print(f"    ✅ Member saves ${diff:.2f}/hr")
                     any_difference = True
                 elif diff < -0.01:
-                    print(f"    ⚠️  Member pays more? Diff=${diff:.2f}")
+                    print(f"    ⚠️  Member pays more? ${abs(diff):.2f}")
                 else:
-                    print(f"    — Same price, no member discount")
-            else:
-                print(f"    ⚠️  Could not fetch one or both prices")
+                    print(f"    — Same price")
             await asyncio.sleep(0.5)
         print()
 
     print("=" * 60)
-    if any_difference:
-        print("✅ Member pricing confirmed — worth implementing in scraper.")
-    else:
-        print("— No member price differences found across tested venues.")
+    print("✅ Member pricing differs — implement in scraper." if any_difference
+          else "— No member discounts found on court hire.")
 
 
 if __name__ == "__main__":
