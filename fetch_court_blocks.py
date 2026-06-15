@@ -16,7 +16,6 @@ DAYS_AHEAD = int(os.environ.get("DAYS_AHEAD", "2"))
 
 PBP_SLUG_MAP = {
     597:  "nplpickleball",
-    885:  "sportswellpickleballpalace",
     1009: "easternindoorpickleballclub",
     1379: "pickleholic",
     1355: "statepickleballcentre",
@@ -32,13 +31,10 @@ PBP_SLUG_MAP = {
     1664: "TheRallyPickleball",
     1714: "RunwayPickleball",
     1733: "pickleballpowerhouse",
-    1770: "rayapickleballclub",
-    1783: "PICKLE4REAL"
 }
 
 VENUE_NAMES = {
     597:  "The Jar | South Melbourne",
-    885:  "SportsWell | Pickleball Palace",
     1009: "Eastern Indoor Pickleball Club",
     1379: "PICKLEHOLIC",
     1355: "State Pickleball Centre",
@@ -54,8 +50,6 @@ VENUE_NAMES = {
     1664: "The Rally Pickleball | Altona",
     1714: "Runway Pickleball",
     1733: "Pickleball Powerhouse",
-    1770: "Raya Pickleball Club",
-    1783: "Pickle4Real"
 }
 
 # Venues that use non-pickleball surface names for court hire
