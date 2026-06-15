@@ -165,6 +165,11 @@ async def fetch_member_prices_for_venue(venue: dict, cookies: dict, pbp_user_id:
     shift_times = {"lowtime": 8 * 3600, "day": 11 * 3600, "primetime": 18 * 3600}
 
     for court_id, shifts in combos.items():
+        try:
+            int(court_id)
+        except (ValueError, TypeError):
+            print(f"  Skipping non-numeric court_id: {court_id}")
+            continue
         for shift in shifts:
             cache_key = f"{court_id}_{shift}"
             if cache_key in member_prices:
