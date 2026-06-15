@@ -1,9 +1,8 @@
 name: Fetch Court Blocks
-
 on:
   schedule:
-    - cron: '0,15,30,45 * * * *'  # Every 15 min - today+tomorrow
-    - cron: '5 * * * *'            # Every hour - days 3-7
+    - cron: '0,15,30,45 * * * *'
+    - cron: '5 * * * *'
   workflow_dispatch:
     inputs:
       days_ahead:
@@ -14,50 +13,37 @@ jobs:
   fetch-near:
     name: Fetch today + tomorrow
     runs-on: ubuntu-latest
-    if: github.event_name != 'schedule' || (github.event_name == 'schedule' && contains('0,15,30,45', ''))
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && startsWith(github.event.schedule, '0,15'))
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
       - name: Install dependencies
-        run: |
-          pip install httpx curl_cffi loguru python-dotenv rich supabase typer tenacity playwright
-          playwright install chromium
-
+        run: pip install httpx curl_cffi loguru python-dotenv rich supabase typer tenacity
       - name: Fetch court blocks (today + tomorrow)
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           PBP_COOKIES_JSON: ${{ secrets.PBP_COOKIES_JSON }}
           DAYS_AHEAD: '2'
-          PROXY_URL: ''
         run: python fetch_court_blocks.py
 
   fetch-far:
     name: Fetch days 3-7
     runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' && startsWith(github.event.schedule, '5 ')
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
       - name: Install dependencies
-        run: |
-          pip install httpx curl_cffi loguru python-dotenv rich supabase typer tenacity playwright
-          playwright install chromium
-
+        run: pip install httpx curl_cffi loguru python-dotenv rich supabase typer tenacity
       - name: Fetch court blocks (days 3-7)
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           PBP_COOKIES_JSON: ${{ secrets.PBP_COOKIES_JSON }}
           DAYS_AHEAD: '7'
-          PROXY_URL: ''
         run: python fetch_court_blocks.py
