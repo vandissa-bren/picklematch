@@ -1,5 +1,5 @@
 """
-push_to_supabase.py — Scrape PBP/OpenSports/SportLogic and push to Supabase cache.
+push_to_supabase.py — Scrape PBP venues and push to Supabase cache.
 Runs on the DO server every hour via cron.
 Requires .pbp_cookies.json (uploaded by refresh_cookies.py from Windows machine).
 """
@@ -26,15 +26,14 @@ except ImportError:
 
 sys.path.insert(0, str(Path(__file__).parent))
 from extract_thejar import PlayByPointAPI, _extract_react_props_from_html
-from extract_opensports import OpenSportsAPI, parse_session
-from extract_sportlogic import SportLogicClient, VENUES as SL_VENUES
+
 
 console = Console()
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://stwohmddmdwttasbyblt.supabase.co")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InN0d29obWRkbWR3dHRhc2J5Ymx0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg3MjQ3OTMsImV4cCI6MjA5NDMwMDc5M30.x7VcVmJZ35S1uZy9_SU5RlB_MnuLziX2v81y9l02Yy8")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InN0d29obWRkbWR3dHRhc2J5Ymx0Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3ODcyNDc5MywiZXhwIjoyMDk0MzAwNzkzfQ.zrsXJVxX4OZv0Eb5qycQF3_33NFyAFJfPlvK_xCzi-E")
 PROXY_URL = os.environ.get("PROXY_URL") or None
-DAYS_AHEAD = 7
+DAYS_AHEAD = 14
 
 PBP_SLUG_MAP: dict[int, str] = {
     597:  "nplpickleball",
@@ -53,6 +52,10 @@ PBP_SLUG_MAP: dict[int, str] = {
     1487: "Pickle-Playground",
     1664: "TheRallyPickleball",
     1714: "RunwayPickleball",
+    1733: "pickleballpowerhouse",
+    1770: "rayapickleballclub",
+    1783: "PICKLE4REAL",
+    1696: "picklezone",
 }
 
 VENUE_NAMES: dict[int, str] = {
@@ -72,6 +75,8 @@ VENUE_NAMES: dict[int, str] = {
     1487: "Pickle Playground",
     1664: "The Rally Pickleball | Altona",
     1714: "Runway Pickleball",
+    1733: "Pickleball Powerhouse",
+    1770: "Raya Pickleball Club",
 }
 
 
@@ -117,6 +122,37 @@ async def supabase_upsert(records: list[dict]) -> None:
         "Prefer": "resolution=merge-duplicates",
     }
     async with httpx.AsyncClient(timeout=30.0) as client:
+        # Fetch existing records to preserve court_prices, shift_map, court blocks
+        row_ids = [r["id"] for r in records if "id" in r]
+        existing_by_id = {}
+        if row_ids:
+            fetch_resp = await client.get(
+                f"{SUPABASE_URL}/rest/v1/availability_cache",
+                params={"id": f"in.({','.join(row_ids)})", "select": "id,data"},
+                headers=headers,
+            )
+            if fetch_resp.status_code == 200:
+                for row in fetch_resp.json():
+                    existing_by_id[row["id"]] = row["data"]
+
+        # Merge court_prices, shift_map, by_date into record["data"]
+        for record in records:
+            row_id = record.get("id")
+            existing_data = existing_by_id.get(row_id, {})
+            if existing_data and "data" in record:
+                inner = record["data"]
+                if "court_prices" not in inner and "court_prices" in existing_data:
+                    inner["court_prices"] = existing_data["court_prices"]
+                if "shift_map" not in inner and "shift_map" in existing_data:
+                    inner["shift_map"] = existing_data["shift_map"]
+                existing_by_date = existing_data.get("by_date", {})
+                new_by_date = inner.get("by_date", {})
+                for date_str, existing_blocks in existing_by_date.items():
+                    if date_str not in new_by_date or not new_by_date[date_str]:
+                        if existing_blocks:
+                            new_by_date[date_str] = existing_blocks
+                inner["by_date"] = new_by_date
+
         resp = await client.post(
             f"{SUPABASE_URL}/rest/v1/availability_cache",
             json=records,
@@ -124,7 +160,6 @@ async def supabase_upsert(records: list[dict]) -> None:
         )
         if resp.status_code not in (200, 201):
             console.print(f"  [red]Supabase error {resp.status_code}: {resp.text[:200]}[/red]")
-
 
 async def scrape_pbp_venue(
     cookies: dict,
@@ -169,7 +204,14 @@ async def scrape_pbp_venue(
 
                 # Skip clinics with no upcoming sessions in our date range
                 week_days = stub.get("future_week_days") or []
-                has_upcoming = any(((d.weekday() + 1) % 7) in week_days for d in dates)
+                # Use Melbourne timezone to avoid UTC date mismatch
+                from zoneinfo import ZoneInfo
+                melb = ZoneInfo("Australia/Melbourne")
+                from datetime import datetime as _dt
+                has_upcoming = any(
+                    ((_dt.combine(d, _dt.min.time()).replace(tzinfo=melb).weekday() + 1) % 7) in week_days
+                    for d in dates
+                ) if week_days else True
                 if not has_upcoming:
                     continue
 
@@ -181,8 +223,19 @@ async def scrape_pbp_venue(
 
                     # Metadata
                     raw_desc = props.get("description") or ""
-                    desc = re.sub(r"<[^>]+>", " ", raw_desc).strip()[:500]
-                    desc = re.sub(r"\s+", " ", desc)
+                    desc_html = ""
+                    if not raw_desc and html:
+                        import re as _re
+                        start_m = _re.search(r'class="program-description">', html)
+                        if start_m:
+                            chunk = html[start_m.end():start_m.end() + 8000]
+                            # Find the end by locating closing row div
+                            end_m = _re.search(r'</div>\s*</div>\s*</div>', chunk, _re.S)
+                            raw_desc = chunk[:end_m.start()].strip() if end_m else chunk.strip()
+                    desc_html = raw_desc[:5000]
+                    desc = re.sub(r"<[^>]+>", " ", raw_desc).strip()
+                    desc = desc.replace("&nbsp;", " ").replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">").replace("&#8203;", "").replace("\u200b", "")
+                    desc = re.sub(r"\s+", " ", desc).strip()[:1000]
                     sl = stub.get("ntrp_str") or ""
                     if not sl:
                         mn = props.get("min_rating")
@@ -193,8 +246,9 @@ async def scrape_pbp_venue(
                             sl = f"{mn}+"
                     price = ""
                     for pl in (props.get("prices") or props.get("packages") or []):
-                        if not pl.get("hidden") and pl.get("price"):
-                            price = f"${float(pl['price']):.0f}"
+                        if not pl.get("hidden") and pl.get("price") and pl.get("player_category") != "member":
+                            p = float(pl["price"])
+                            price = f"${p:.0f}" if p == int(p) else f"${p:.2f}"
                             break
 
                     for lesson in lessons_raw:
@@ -205,15 +259,15 @@ async def scrape_pbp_venue(
                         cap = lesson.get("capacity") or stub.get("capacity") or 0
                         pc = lesson.get("player_count", 0)
                         spots = max(0, cap - pc) if cap else None
-                        if spots == 0:
-                            continue
+                        is_full = cap > 0 and spots == 0
                         hs = lesson.get("hour_start", 0)
                         he = lesson.get("hour_end", hs + 3600)
 
                         lp = price
                         for ip in (lesson.get("individual_prices") or []):
-                            if ip.get("price"):
-                                lp = f"${float(ip['price']):.0f}"
+                            if ip.get("price") and ip.get("player_category") != "member":
+                                p = float(ip["price"])
+                                lp = f"${p:.0f}" if p == int(p) else f"${p:.2f}"
                                 break
 
                         # Roster
@@ -222,7 +276,7 @@ async def scrape_pbp_venue(
                             try:
                                 rd = await api._get_json(
                                     "/api/public/clinics/lesson_players",
-                                    params={"lesson_id": lid},
+                                    params={"lesson_id": lid, "rating_provider": "dupr"},
                                 )
                                 roster = [
                                     {
@@ -245,11 +299,14 @@ async def scrape_pbp_venue(
                             "end": _sec_to_hhmm(he),
                             "price": lp,
                             "spots_left": spots,
+                            "status": "Full" if is_full else "Available",
                             "capacity": cap,
                             "description": desc,
+                            "description_html": desc_html,
                             "skill_level": sl,
                             "roster": roster,
                             "lesson_id": lid,
+                            "program_slug": program_slug,
                         })
                 except Exception as e:
                     console.print(f"    [yellow]clinic {clinic_id} error for {name}: {e}[/yellow]")
@@ -260,46 +317,10 @@ async def scrape_pbp_venue(
     return result
 
 
-async def scrape_opensports(dates: list[date]) -> list[dict]:
-    try:
-        async with OpenSportsAPI() as api:
-            raw = await api.search_sessions(
-                latitude=-37.815, longitude=144.966, radius_km=35, limit=200
-            )
-        sessions = [parse_session(s) for s in raw]
-        date_strs = {d.isoformat() for d in dates}
-        sessions = [s for s in sessions if s["date"] in date_strs and s["status"] != "Full"]
-        for s in sessions:
-            s.pop("raw", None)
-        return sessions
-    except Exception as e:
-        console.print(f"  [yellow]OpenSports error: {e}[/yellow]")
-        return []
 
 
-async def scrape_sportlogic(dates: list[date]) -> list[dict]:
-    results = []
-    for vk, v in SL_VENUES.items():
-        try:
-            async with SportLogicClient(vk) as client:
-                by_date = {}
-                for d in dates:
-                    try:
-                        slots = await client.get_availability(d)
-                        by_date[d.isoformat()] = slots
-                    except Exception:
-                        by_date[d.isoformat()] = []
-                results.append({
-                    "id": f"sportlogic-{vk}",
-                    "name": v.get("name", vk),
-                    "platform": "sportlogic",
-                    "by_date": by_date,
-                    "sessions": [],
-                })
-                console.print(f"  [green]✓[/green] {v.get('name', vk)}")
-        except Exception as e:
-            console.print(f"  [yellow]SportLogic error for {vk}: {e}[/yellow]")
-    return results
+
+
 
 
 async def run_once():
@@ -335,35 +356,6 @@ async def run_once():
         await supabase_upsert(records)
         console.print(f"[green]✓ Pushed {len(records)} PBP venues to Supabase[/green]\n")
 
-    # ── OpenSports ────────────────────────────────────────────────────────────
-    console.print("Scraping OpenSports…")
-    os_sessions = await scrape_opensports(dates)
-    if os_sessions:
-        os_record = [{
-            "id": "opensports-melbourne",
-            "venue_name": "OpenSports Melbourne",
-            "platform": "opensports",
-            "date": date.today().isoformat(),
-            "data": {"sessions": os_sessions},
-            "updated_at": datetime.utcnow().isoformat(),
-        }]
-        await supabase_upsert(os_record)
-        console.print(f"[green]✓ Pushed {len(os_sessions)} OpenSports sessions[/green]\n")
-
-    # ── SportLogic ────────────────────────────────────────────────────────────
-    console.print("Scraping SportLogic…")
-    sl_results = await scrape_sportlogic(dates)
-    if sl_results:
-        sl_records = [{
-            "id": f"sportlogic-{r['id']}",
-            "venue_name": r["name"],
-            "platform": "sportlogic",
-            "date": date.today().isoformat(),
-            "data": r,
-            "updated_at": datetime.utcnow().isoformat(),
-        } for r in sl_results]
-        await supabase_upsert(sl_records)
-        console.print(f"[green]✓ Pushed {len(sl_results)} SportLogic venues[/green]\n")
 
     console.print(f"Sync complete · {datetime.now().strftime('%H:%M:%S')}")
 
