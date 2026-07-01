@@ -58,6 +58,7 @@ VENUE_NAMES = {
 VENUE_SURFACES = {
     885: ["pickleball"],
     1557: ["standard_courts", "championship_courts"],
+    1379: ["main_courts"],
 }
 
 
