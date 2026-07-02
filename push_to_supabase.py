@@ -56,6 +56,7 @@ PBP_SLUG_MAP: dict[int, str] = {
     1770: "rayapickleballclub",
     1783: "PICKLE4REAL",
     1696: "picklezone",
+    1883: "TheJarHQ",
 }
 
 VENUE_NAMES: dict[int, str] = {
@@ -77,6 +78,9 @@ VENUE_NAMES: dict[int, str] = {
     1714: "Runway Pickleball",
     1733: "Pickleball Powerhouse",
     1770: "Raya Pickleball Club",
+    1783: "PICKLE4REAL",
+    1696: "Picklezone",
+    1883: "The Jar HQ | Maidstone",
 }
 
 
