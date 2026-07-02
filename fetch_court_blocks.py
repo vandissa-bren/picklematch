@@ -32,6 +32,7 @@ PBP_SLUG_MAP = {
     1714: "RunwayPickleball",
     1733: "pickleballpowerhouse",
     1696: "picklezone",
+    1883: "TheJarHQ",
 }
 
 VENUE_NAMES = {
@@ -52,6 +53,7 @@ VENUE_NAMES = {
     1714: "Runway Pickleball",
     1733: "Pickleball Powerhouse",
     1696: "Picklezone",
+    1883: "The Jar | Maidstone",
 }
 
 # Venues that use non-pickleball surface names for court hire
