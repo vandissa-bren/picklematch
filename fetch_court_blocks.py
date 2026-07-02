@@ -53,7 +53,7 @@ VENUE_NAMES = {
     1714: "Runway Pickleball",
     1733: "Pickleball Powerhouse",
     1696: "Picklezone",
-    1883: "The Jar | Maidstone",
+    1883: "The Jar HQ | Maidstone",
 }
 
 # Venues that use non-pickleball surface names for court hire
