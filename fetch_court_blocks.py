@@ -68,14 +68,18 @@ def sec_to_hhmm(sec: int) -> str:
     return f"{h:02d}:{m:02d}"
 
 
-def get_shift(sec: int) -> str:
-    """Derive pricing shift from time of day (fallback only)."""
+def get_shift(sec: int, target_date: date = None) -> str:
+    """Derive pricing shift from time of day, with weekend suffix if applicable."""
     hour = sec // 3600
     if hour >= 17:
-        return "primetime"
+        shift = "primetime"
     elif hour >= 12:
-        return "day"
-    return "lowtime"
+        shift = "day"
+    else:
+        shift = "lowtime"
+    if target_date and target_date.weekday() >= 5:
+        shift = f"{shift}_weekend"
+    return shift
 
 
 async def fetch_blocks_for_surface(api, facility_id: int, target_date: date, surface: str) -> dict:
@@ -163,7 +167,7 @@ async def fetch_missing_prices(api, blocks: list, target_date: date, user_id: in
         start_sec = block.get("start_sec")
         if not court_id or start_sec is None:
             continue
-        shift = get_shift(start_sec)
+        shift = get_shift(start_sec, target_date)
         cache_key = f"{court_id}_{shift}"
 
         # Check if we already have price under derived key or any existing key for this court
@@ -204,7 +208,7 @@ async def fetch_missing_prices(api, blocks: list, target_date: date, user_id: in
     return new_prices, shift_map
 
 
-def apply_prices_to_blocks(blocks: list, court_prices: dict, shift_map: dict) -> list:
+def apply_prices_to_blocks(blocks: list, court_prices: dict, shift_map: dict, target_date: date = None) -> list:
     """
     Map stored prices onto blocks.
     Tries PBP shift key first, falls back to derived shift key.
@@ -213,7 +217,7 @@ def apply_prices_to_blocks(blocks: list, court_prices: dict, shift_map: dict) ->
     for block in blocks:
         court_id = block.get("court_id")
         start_sec = block.get("start_sec")
-        shift = get_shift(start_sec) if start_sec is not None else None
+        shift = get_shift(start_sec, target_date) if start_sec is not None else None
         price = None
 
         if court_id and shift:
@@ -268,7 +272,7 @@ async def fetch_court_blocks_for_venue(api, facility_id: int, target_date: date,
         for court_id, mapping in new_shift_map.items():
             existing_shift_map.setdefault(court_id, {}).update(mapping)
 
-        blocks_with_prices = apply_prices_to_blocks(blocks, updated_prices, existing_shift_map)
+        blocks_with_prices = apply_prices_to_blocks(blocks, updated_prices, existing_shift_map, target_date)
         return blocks_with_prices, updated_prices, existing_shift_map
 
     except Exception as e:
