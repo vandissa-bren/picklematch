@@ -2,7 +2,7 @@ name: Fetch Court Blocks
 on:
   schedule:
     - cron: '0,15,30,45 * * * *'
-    - cron: '5 * * * *'
+    - cron: '5 */2 * * *'
   workflow_dispatch:
     inputs:
       days_ahead:
@@ -29,7 +29,7 @@ jobs:
           DAYS_AHEAD: '2'
         run: python fetch_court_blocks.py
 
-  fetch-far:
+  fetch-mid:
     name: Fetch days 3-7
     runs-on: ubuntu-latest
     if: github.event_name == 'schedule' && startsWith(github.event.schedule, '5 ')
@@ -46,4 +46,24 @@ jobs:
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           PBP_COOKIES_JSON: ${{ secrets.PBP_COOKIES_JSON }}
           DAYS_AHEAD: '7'
+        run: python fetch_court_blocks.py
+
+  fetch-far:
+    name: Fetch days 8-14
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' && startsWith(github.event.schedule, '5 */2')
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: pip install httpx curl_cffi loguru python-dotenv rich supabase typer tenacity
+      - name: Fetch court blocks (days 8-14)
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          PBP_COOKIES_JSON: ${{ secrets.PBP_COOKIES_JSON }}
+          DAYS_AHEAD: '14'
+          DAYS_START: '8'
         run: python fetch_court_blocks.py
