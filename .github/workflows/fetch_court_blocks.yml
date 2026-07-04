@@ -2,7 +2,8 @@ name: Fetch Court Blocks
 on:
   schedule:
     - cron: '0,15,30,45 * * * *'
-    - cron: '5 */2 * * *'
+    - cron: '5 * * * *'
+    - cron: '7 */2 * * *'
   workflow_dispatch:
     inputs:
       days_ahead:
@@ -32,7 +33,7 @@ jobs:
   fetch-mid:
     name: Fetch days 3-7
     runs-on: ubuntu-latest
-    if: github.event_name == 'schedule' && startsWith(github.event.schedule, '5 ')
+    if: github.event_name == 'schedule' && startsWith(github.event.schedule, '5 * ')
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -51,7 +52,7 @@ jobs:
   fetch-far:
     name: Fetch days 8-14
     runs-on: ubuntu-latest
-    if: github.event_name == 'schedule' && startsWith(github.event.schedule, '5 */2')
+    if: github.event_name == 'schedule' && startsWith(github.event.schedule, '7 ')
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
