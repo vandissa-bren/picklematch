@@ -13,6 +13,7 @@ SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 PBP_COOKIES_JSON = os.environ["PBP_COOKIES_JSON"]
 DAYS_AHEAD = int(os.environ.get("DAYS_AHEAD", "2"))
+DAYS_START = int(os.environ.get("DAYS_START", "0"))
 
 PBP_SLUG_MAP = {
     597:  "nplpickleball",
@@ -291,7 +292,7 @@ async def main():
     user_id = cookie_data["user_id"]
 
     today = datetime.now(ZoneInfo('Australia/Melbourne')).date()
-    dates = [today + timedelta(days=i) for i in range(DAYS_AHEAD)]
+    dates = [today + timedelta(days=i) for i in range(DAYS_START, DAYS_AHEAD)]
 
     print(f"Fetching court blocks for {len(dates)} dates x {len(PBP_SLUG_MAP)} venues...")
 
