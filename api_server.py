@@ -1,7 +1,7 @@
 """
 api_server.py  —  PickleMatch FastAPI backend
 
-Wraps extract_thejar.py, extract_opensports.py, and extract_sportlogic.py
+Wraps extract_thejar.py
 into a REST API your React frontend can call.
 
 Start:
@@ -27,7 +27,7 @@ from typing import Optional
 import sys
 
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Query, HTTPException
+from fastapi import FastAPI, Query, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -40,18 +40,21 @@ except ImportError:
 
 # ── Scraper imports ────────────────────────────────────────────────────────
 sys.path.insert(0, str(Path(__file__).parent))
+import stripe
+
+STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY", "")
+STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
+STRIPE_PUBLISHABLE_KEY = os.environ.get("STRIPE_PUBLISHABLE_KEY", "pk_live_51TrY95K2PC6iTJ2oGj2s58hhTGMtSllc8hwCMyfX55jY8oWz8QeEVm4DpVRQDgWt1zI5Lg09kcSbK1cQdnHW0iZk00Pw42nNZn")
+
+if STRIPE_SECRET_KEY:
+    stripe.api_key = STRIPE_SECRET_KEY
+
 from extract_thejar import (
     PlayByPointAPI,
     _load_cached_session,
     _extract_react_props_from_html,
 )
-from extract_opensports import OpenSportsAPI, parse_session
-from extract_sportlogic import (
-    SportLogicClient,
-    VENUES as SL_VENUES,
-    _load_session as sl_load_session,
-    _ensure_valid_session,
-)
+
 
 logger = logging.getLogger("pickleball_api")
 
@@ -150,6 +153,9 @@ async def _read_from_supabase(platform: str) -> list[dict]:
     return []
 
 # ── Slug map for saved venues ───────────────────────────────────────────────
+# In-memory cache for live court fetches (facility_id+date -> {blocks, expires})
+_live_courts_cache: dict[str, dict] = {}
+
 PBP_SLUG_MAP: dict[int, str] = {
     597:  "nplpickleball",
     885:  "sportswellpickleballpalace",
@@ -167,6 +173,11 @@ PBP_SLUG_MAP: dict[int, str] = {
     1487: "Pickle-Playground",
     1664: "TheRallyPickleball",
     1714: "RunwayPickleball",
+    1733: "pickleballpowerhouse",
+    1696: "picklezone",
+    1770: "rayapickleballclub",
+    1783: "PICKLE4REAL",
+    1883: "TheJarHQ",
 }
 
 VENUE_NAMES: dict[int, str] = {
@@ -186,6 +197,17 @@ VENUE_NAMES: dict[int, str] = {
     1487: "Pickle Playground",
     1664: "The Rally Pickleball | Altona",
     1714: "Runway Pickleball",
+    1733: "Pickleball Powerhouse",
+    1696: "Picklezone",
+    1770: "Raya Pickleball Club",
+    1783: "PICKLE4REAL",
+    1883: "The Jar HQ | Maidstone",
+}
+
+VENUE_SURFACES: dict[int, list[str]] = {
+    885: ["pickleball"],
+    1557: ["standard_courts", "championship_courts"],
+    1379: ["main_courts"],
 }
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
@@ -707,170 +729,6 @@ async def pbp_single_venue(
     }
 
 
-# ── OpenSports ──────────────────────────────────────────────────────────────
-
-@app.get("/api/opensports/sessions")
-async def opensports_sessions(
-    lat: float = Query(-37.815, description="Latitude"),
-    lng: float = Query(144.966, description="Longitude"),
-    radius: float = Query(25, description="Radius in km"),
-    days: int = Query(7, description="Days ahead to fetch"),
-    date: Optional[str] = Query(None, description="Filter to specific date YYYY-MM-DD"),
-):
-    """
-    Get upcoming OpenSports pickleball sessions near a location.
-
-    Example:
-        GET /api/opensports/sessions?lat=-37.815&lng=144.966&radius=30&days=7
-    """
-    async with OpenSportsAPI() as api:
-        raw = await api.search_sessions(
-            latitude=lat,
-            longitude=lng,
-            radius_km=radius,
-            limit=200,
-        )
-
-    sessions = [parse_session(s) for s in raw]
-
-    # Filter by date range.
-    now = datetime.now()
-    cutoff = (now + timedelta(days=days)).strftime("%Y-%m-%d")
-    today = now.strftime("%Y-%m-%d")
-
-    if date:
-        sessions = [s for s in sessions if s["date"] == date]
-    else:
-        sessions = [s for s in sessions if today <= s["date"] <= cutoff]
-
-    sessions = [s for s in sessions if s["status"] != "Full"]
-    sessions.sort(key=lambda s: (s["date"], s["start_time"]))
-
-    # Slim down for API response (remove raw).
-    slim = []
-    for s in sessions:
-        s.pop("raw", None)
-        slim.append(s)
-
-    return {
-        "sessions": slim,
-        "count": len(slim),
-        "location": {"lat": lat, "lng": lng, "radius_km": radius},
-    }
-
-
-# ── SportLogic ──────────────────────────────────────────────────────────────
-
-@app.get("/api/sportlogic/venues")
-async def sportlogic_venues():
-    """List known SportLogic venues with session status."""
-    venues = []
-    for key, v in SL_VENUES.items():
-        has_session = bool(sl_load_session(key))
-        venues.append({
-            "key": key,
-            "name": v["name"],
-            "base_url": v["base_url"],
-            "has_session": has_session,
-        })
-    return {"venues": venues}
-
-
-@app.get("/api/sportlogic/availability")
-async def sportlogic_availability(
-    venues: str = Query("picklepark,pickleplay", description="Comma-separated venue keys"),
-    date: Optional[str] = Query(None),
-    from_time: str = Query("16:00", alias="from"),
-    to_time: str = Query("23:00", alias="to"),
-    pricing: bool = Query(False, description="Fetch prices (requires login session)"),
-):
-    """
-    Get court availability for SportLogic venues.
-
-    Example:
-        GET /api/sportlogic/availability?venues=picklepark,pickleplay&from=18:00&to=22:00
-        GET /api/sportlogic/availability?venues=picklepark&pricing=true
-    """
-    target_date = (datetime.strptime(date, "%Y-%m-%d").date()
-                   if date else datetime.today().date())
-    from_sec = _hhmm_to_sec(from_time)
-    to_sec = _hhmm_to_sec(to_time)
-    venue_keys = [v.strip() for v in venues.split(",") if v.strip() in SL_VENUES]
-
-    results = []
-    for vk in venue_keys:
-        jsid = None
-        if pricing:
-            jsid = await _ensure_valid_session(vk)
-
-        async with SportLogicClient(vk, jsessionid=jsid) as client:
-            slots = await client.get_availability(target_date)
-            slots = [s for s in slots if from_sec <= s["hour"] * 3600 < to_sec]
-
-            if pricing and jsid:
-                slots = await client.enrich_with_prices(slots, auto_refresh=False)
-
-            # Group into bookable blocks per court.
-            court_slots: dict[str, list[dict]] = {}
-            for s in slots:
-                court_slots.setdefault(s["court_id"], []).append(s)
-
-            court_blocks = []
-            for court_id, cs in court_slots.items():
-                cs_sorted = sorted(cs, key=lambda x: x["time"])
-                run_start = run_end = None
-                run_slots = []
-                for s in cs_sorted:
-                    h, m = s["time"].split(":")
-                    sec = int(h) * 3600 + int(m) * 60
-                    if run_start is None:
-                        run_start = run_end = sec
-                        run_slots = [s]
-                    elif sec == run_end + 3600:
-                        run_end = sec
-                        run_slots.append(s)
-                    else:
-                        dur = (run_end - run_start) // 60 + 60
-                        if dur >= 60:
-                            court_blocks.append({
-                                "court": cs_sorted[0]["court_name"],
-                                "start": _sec_to_hhmm(run_start),
-                                "end": _sec_to_hhmm(run_end + 3600),
-                                "duration_min": dur,
-                                "price": run_slots[0].get("price"),
-                                "full_price": run_slots[0].get("full_price"),
-                            })
-                        run_start = run_end = sec
-                        run_slots = [s]
-                if run_start is not None:
-                    dur = (run_end - run_start) // 60 + 60
-                    if dur >= 60:
-                        court_blocks.append({
-                            "court": cs_sorted[0]["court_name"],
-                            "start": _sec_to_hhmm(run_start),
-                            "end": _sec_to_hhmm(run_end + 3600),
-                            "duration_min": dur,
-                            "price": run_slots[0].get("price"),
-                            "full_price": run_slots[0].get("full_price"),
-                        })
-
-            results.append({
-                "key": vk,
-                "name": SL_VENUES[vk]["name"],
-                "platform": "sportlogic",
-                "date": target_date.isoformat(),
-                "court_blocks": sorted(court_blocks, key=lambda x: x["start"]),
-                "pricing_included": pricing and bool(jsid),
-            })
-
-    return {
-        "date": target_date.isoformat(),
-        "from": from_time,
-        "to": to_time,
-        "venues": results,
-    }
-
-
 # ── Combined ─────────────────────────────────────────────────────────────────
 
 @app.get("/api/all")
@@ -878,93 +736,19 @@ async def all_availability(
     date: Optional[str] = Query(None),
     from_time: str = Query("16:00", alias="from"),
     to_time: str = Query("23:00", alias="to"),
-    include_opensports: bool = Query(True),
-    include_sportlogic: bool = Query(True),
 ):
-    """
-    Get everything — PBP + OpenSports + SportLogic in one call.
-
-    This is the main endpoint for the dashboard.
-
-    Example:
-        GET /api/all?from=18:00&to=22:00
-        GET /api/all?date=2026-05-20&from=09:00&to=23:00
-    """
+    """Get all PBP availability in one call."""
     target_date = (datetime.strptime(date, "%Y-%m-%d").date()
                    if date else datetime.today().date())
     from_sec = _hhmm_to_sec(from_time)
     to_sec = _hhmm_to_sec(to_time)
-
-    # Run all platform fetches concurrently.
-    pbp_task = asyncio.create_task(_fetch_all_pbp(target_date, from_sec, to_sec))
-
-    os_task = (
-        asyncio.create_task(_fetch_opensports(target_date))
-        if include_opensports else asyncio.create_task(asyncio.coroutine(lambda: [])())
-    )
-
-    sl_task = (
-        asyncio.create_task(_fetch_sportlogic(target_date, from_sec, to_sec))
-        if include_sportlogic else asyncio.create_task(asyncio.coroutine(lambda: [])())
-    )
-
-    pbp_results, os_results, sl_results = await asyncio.gather(
-        pbp_task, os_task, sl_task, return_exceptions=True
-    )
-
+    pbp_results = await _fetch_all_pbp(target_date, from_sec, to_sec)
     return {
         "date": target_date.isoformat(),
         "from": from_time,
         "to": to_time,
-        "playbypoint": pbp_results if not isinstance(pbp_results, Exception) else [],
-        "opensports": os_results if not isinstance(os_results, Exception) else [],
-        "sportlogic": sl_results if not isinstance(sl_results, Exception) else [],
+        "playbypoint": pbp_results,
     }
-
-
-async def _fetch_all_pbp(target_date: date, from_sec: int, to_sec: int) -> list:
-    venues = await _get_pbp_venues()
-    tasks = [
-        _get_pbp_availability(
-            v["id"], v["name"], v["slug"], target_date, from_sec, to_sec
-        )
-        for v in venues
-    ]
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-    return [r for r in results if not isinstance(r, Exception)]
-
-
-async def _fetch_opensports(target_date: date) -> list:
-    async with OpenSportsAPI() as api:
-        raw = await api.search_sessions(
-            latitude=-37.815, longitude=144.966, radius_km=35, limit=200
-        )
-    sessions = [parse_session(s) for s in raw]
-    today_str = target_date.isoformat()
-    sessions = [s for s in sessions
-                if s["date"] == today_str and s["status"] != "Full"]
-    for s in sessions:
-        s.pop("raw", None)
-    return sessions
-
-
-async def _fetch_sportlogic(target_date: date, from_sec: int, to_sec: int) -> list:
-    results = []
-    for vk in SL_VENUES:
-        try:
-            async with SportLogicClient(vk) as client:
-                slots = await client.get_availability(target_date)
-                slots = [s for s in slots if from_sec <= s["hour"] * 3600 < to_sec]
-                results.append({
-                    "key": vk,
-                    "name": SL_VENUES[vk]["name"],
-                    "platform": "sportlogic",
-                    "slots": [{"court": s["court_name"], "time": s["time"]}
-                               for s in slots],
-                })
-        except Exception:
-            pass
-    return results
 
 
 # ── PBP Booking ───────────────────────────────────────────────────────────────
@@ -1341,14 +1125,608 @@ async def pbp_connect(req: ConnectRequest):
             if resp.status_code not in (200, 201, 204):
                 raise HTTPException(status_code=500, detail=f"Failed to save credentials: {resp.text}")
 
+        # Step 4: Fetch DUPR ratings
+        dupr_rating = None
+        dupr_rating_doubles = None
+        dupr_rating_name = None
+        try:
+            from curl_cffi.requests import AsyncSession as _Session
+            _sess = _Session(impersonate="chrome124")
+            _r = await _sess.get(
+                f"https://app.playbypoint.com/api/users/{pbp_user_id}/ratings",
+                cookies=all_cookies,
+                headers={"Accept": "application/json", "X-Requested-With": "XMLHttpRequest"},
+            )
+            if _r.status_code == 200:
+                _ratings = _r.json().get("ratings", [])
+                _dupr = next((x for x in _ratings if x.get("provider") == "dupr"), None)
+                _nrp = next((x for x in _ratings if x.get("provider") == "ntrp_default"), None)
+                _best = _dupr or _nrp
+                if _best:
+                    dupr_rating = _best.get("single")
+                    dupr_rating_doubles = _best.get("double")
+                    dupr_rating_name = "DUPR" if _dupr else "NRP"
+            if dupr_rating is not None or dupr_rating_doubles is not None:
+                _upd = {}
+                if dupr_rating is not None: _upd["dupr_rating"] = dupr_rating
+                if dupr_rating_doubles is not None: _upd["dupr_rating_doubles"] = dupr_rating_doubles
+                if dupr_rating_name: _upd["dupr_rating_name"] = dupr_rating_name
+                async with httpx.AsyncClient(timeout=10.0) as _c:
+                    await _c.patch(
+                        f"{SUPABASE_URL}/rest/v1/pbp_credentials?user_id=eq.{req.user_id}",
+                        headers=svc_headers,
+                        json=_upd,
+                    )
+        except Exception:
+            pass
+        # Step 5: Sync memberships via booking server (fire and forget)
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as _mc:
+                await _mc.post(f"https://booking.picklematch.com.au/api/sync_memberships/{req.user_id}")
+        except Exception:
+            pass
+
         return {
             "success": True,
             "pbp_email": req.email,
             "pbp_user_id": pbp_user_id,
+            "dupr_rating": dupr_rating,
+            "dupr_rating_doubles": dupr_rating_doubles,
+            "dupr_rating_name": dupr_rating_name,
             "message": "PlayByPoint account connected successfully.",
         }
-
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Connection failed: {e}")
+
+# ── Live session fetch for extended dates ─────────────────────────────────────
+@app.get("/api/live_sessions")
+async def live_sessions(
+    facility_ids: str = Query(...),  # comma-separated facility IDs
+    date: str = Query(...),          # YYYY-MM-DD
+):
+    """Scrape sessions live from PBP for specific venues on a specific date."""
+    import re
+    from extract_thejar import _extract_react_props_from_html
+
+    fids = [int(x.strip()) for x in facility_ids.split(",") if x.strip().isdigit()]
+    target_date = datetime.strptime(date, "%Y-%m-%d").date()
+    date_str = target_date.isoformat()
+
+    # Load system cookies
+    try:
+        with open("/app/.pbp_cookies.json") as f:
+            cookie_data = json.load(f)
+        cookies = cookie_data.get("cookies", {})
+        user_id = cookie_data.get("user_id", 0)
+    except Exception:
+        cookies = {}
+        user_id = 0
+
+    all_sessions = []
+
+    for fid in fids:
+        slug = PBP_SLUG_MAP.get(fid)
+        if not slug:
+            continue
+        try:
+            async with PlayByPointAPI(cookies=cookies, club_slug=slug, proxy=PROXY_URL) as api:
+                api._user_id = user_id
+                resp = await api._get_json(
+                    "/api/public/clinics",
+                    params={"search": "", "facility_id": fid, "per_page": 50},
+                )
+                stubs = (resp or {}).get("clinics") or [] if isinstance(resp, dict) else (resp or [])
+                for stub in stubs:
+                    clinic_id = stub.get("id")
+                    program_url = stub.get("url") or ""
+                    program_slug = program_url.split("/programs/")[-1] if "/programs/" in program_url else ""
+                    if not clinic_id or not program_slug:
+                        continue
+                    try:
+                        html = await api.program_detail_html(program_slug)
+                        props = _extract_react_props_from_html(html)
+                        lessons_raw = props.get("sessions") or props.get("clinic_lessons") or []
+                        raw_desc = props.get("description") or ""
+                        desc = re.sub(r"<[^>]+>", " ", raw_desc).strip()[:500]
+                        desc = re.sub(r"\s+", " ", desc)
+                        sl = stub.get("ntrp_str") or ""
+                        if not sl:
+                            mn = props.get("min_rating")
+                            mx = props.get("max_rating")
+                            if mn and mx:
+                                sl = f"{mn} / {mx}"
+                            elif mn:
+                                sl = f"{mn}+"
+                        price = ""
+                        for pl in (props.get("prices") or props.get("packages") or []):
+                            if not pl.get("hidden") and pl.get("price") and pl.get("player_category") != "member":
+                                p = float(pl["price"])
+                                price = f"${p:.0f}" if p == int(p) else f"${p:.2f}"
+                                break
+                        for lesson in lessons_raw:
+                            ld = lesson.get("lesson_date")
+                            if ld != date_str:
+                                continue
+                            lid = lesson.get("id")
+                            cap = lesson.get("capacity") or stub.get("capacity") or 0
+                            pc = lesson.get("player_count", 0)
+                            spots = max(0, cap - pc) if cap else None
+                            is_full = cap > 0 and spots == 0
+                            hs = lesson.get("hour_start", 0)
+                            he = lesson.get("hour_end", hs + 3600)
+                            lp = price
+                            for ip in (lesson.get("individual_prices") or []):
+                                if ip.get("price") and ip.get("player_category") != "member":
+                                    p = float(ip["price"])
+                                    lp = f"${p:.0f}" if p == int(p) else f"${p:.2f}"
+                                    break
+                            all_sessions.append({
+                                "facility_id": fid,
+                                "title": stub.get("name", "Session"),
+                                "type": stub.get("category") or "Session",
+                                "date": ld,
+                                "start": _sec_to_hhmm(hs),
+                                "end": _sec_to_hhmm(he),
+                                "price": lp,
+                                "spots_left": spots,
+                                "capacity": cap,
+                                "status": "Full" if is_full else "Available",
+                                "description": desc,
+                                "skill_level": sl,
+                                "lesson_id": lid,
+                                "clinic_id": clinic_id,
+                                "program_slug": program_slug,
+                            })
+                    except Exception:
+                        continue
+        except Exception as e:
+            print(f"live_sessions error for {fid}: {e}", flush=True)
+            continue
+
+    return {"sessions": all_sessions, "date": date_str, "fetched_at": datetime.utcnow().isoformat()}
+
+# ── Announcements ─────────────────────────────────────────────────────────────
+@app.get("/api/announcements/{facility_id}")
+async def get_announcements(facility_id: int):
+    """Get announcements for a specific facility."""
+    headers = {
+        "apikey": SUPABASE_SERVICE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+    }
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(
+            f"{SUPABASE_URL}/rest/v1/announcements",
+            params={
+                "facility_id": f"eq.{facility_id}",
+                "select": "announcement_id,title,date_str,body_html,body_text,url,fetched_at",
+                "order": "announcement_id.desc",
+                "limit": "20",
+            },
+            headers=headers,
+        )
+    return {"announcements": resp.json() if resp.status_code == 200 else []}
+
+@app.get("/api/live_courts")
+async def live_courts(
+    facility_id: int = Query(...),
+    date: str = Query(...),  # YYYY-MM-DD
+):
+    """Fetch court blocks live from PBP for a specific venue and date."""
+    from datetime import date as date_type
+    import asyncio
+    target_date = datetime.strptime(date, "%Y-%m-%d").date()
+    slug = PBP_SLUG_MAP.get(facility_id)
+    if not slug:
+        return {"court_blocks": [], "date": date, "error": "Unknown facility"}
+
+    # Check in-memory cache (30 min TTL)
+    import time
+    cache_key = f"{facility_id}:{date}"
+    cached = _live_courts_cache.get(cache_key)
+    if cached and cached["expires"] > time.time():
+        return {"court_blocks": cached["blocks"], "date": date, "facility_id": facility_id, "fetched_at": cached["fetched_at"], "cached": True}
+
+    try:
+        with open("/app/.pbp_cookies.json") as f:
+            cookie_data = json.load(f)
+        cookies = cookie_data.get("cookies", {})
+        user_id = cookie_data.get("user_id", 0)
+    except Exception:
+        cookies = {}
+        user_id = 0
+    try:
+        async with PlayByPointAPI(cookies=cookies, club_slug=slug, proxy=PROXY_URL) as api:
+            api._user_id = user_id
+            # Get surface type
+            surfaces = VENUE_SURFACES.get(facility_id)
+            if not surfaces:
+                try:
+                    ct = await api.court_types(facility_id)
+                    ps = [s for s in (ct or []) if "pickle" in (s.get("surface") or "").lower()]
+                    surfaces = [ps[0]["surface"]] if ps else ["pickleball"]
+                except Exception:
+                    surfaces = ["pickleball"]
+            court_slots: dict = {}
+            for surface in surfaces:
+                try:
+                    hours_data = await api.available_hours(facility_id, target_date, surface=surface)
+                    all_slots = (hours_data or {}).get("available_hours", []) if isinstance(hours_data, dict) else []
+                    valid_secs = [
+                        int(s["seconds_from_midnight"])
+                        for s in all_slots
+                        if isinstance(s, dict) and s.get("available")
+                        and isinstance(s.get("seconds_from_midnight"), (int, float))
+                    ]
+                    for sec in valid_secs:
+                        try:
+                            courts = await api.available_courts(facility_id, target_date, sec, sec + 1800, surface=surface)
+                            for court in (courts or []):
+                                cid = court.get("id") or court.get("name") or "?"
+                                cname = court.get("name") or str(cid)
+                                key = f"{cid}|{cname}"
+                                court_slots.setdefault(key, []).append(sec)
+                            await asyncio.sleep(0.3)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+            # Convert to blocks
+            def sec_to_hhmm(sec):
+                return f"{int(sec)//3600:02d}:{(int(sec)%3600)//60:02d}"
+            blocks = []
+            for court_key, secs in court_slots.items():
+                parts = court_key.split("|", 1)
+                court_id = parts[0]
+                cname = parts[1] if len(parts) > 1 else court_key
+                secs_sorted = sorted(set(secs))
+                run_start = run_end = None
+                for s in secs_sorted:
+                    if run_start is None:
+                        run_start = run_end = s
+                    elif s == run_end + 1800:
+                        run_end = s
+                    else:
+                        dur = (run_end - run_start) // 60 + 30
+                        if dur >= 60:
+                            blocks.append({"court": cname, "court_id": court_id, "start": sec_to_hhmm(run_start), "end": sec_to_hhmm(run_end + 1800), "duration_min": dur, "price": None})
+                        run_start = run_end = s
+                if run_start is not None:
+                    dur = (run_end - run_start) // 60 + 30
+                    if dur >= 60:
+                        blocks.append({"court": cname, "court_id": court_id, "start": sec_to_hhmm(run_start), "end": sec_to_hhmm(run_end + 1800), "duration_min": dur, "price": None})
+            # Get prices from cache
+            try:
+                supabase_data = await _read_from_supabase("playbypoint")
+                cached = next((r for r in supabase_data if r.get("id") == facility_id), {})
+                court_prices = cached.get("court_prices", {})
+                shift_map = cached.get("shift_map", {})
+                isWeekend = target_date.weekday() >= 5
+                for block in blocks:
+                    cid = block["court_id"]
+                    hour = int(block["start"].split(":")[0])
+                    if hour >= 17:
+                        shift = "primetime"
+                    elif hour >= 12:
+                        shift = "day"
+                    else:
+                        shift = "lowtime"
+                    if isWeekend:
+                        shift = f"{shift}_weekend"
+                    pbp_shift = (shift_map.get(cid) or {}).get(shift)
+                    price = court_prices.get(f"{cid}_{pbp_shift}") if pbp_shift else None
+                    if price is None:
+                        price = court_prices.get(f"{cid}_{shift}")
+                    block["price"] = price
+            except Exception:
+                pass
+            import time as _time
+            _live_courts_cache[f"{facility_id}:{date}"] = {"blocks": blocks, "expires": _time.time() + 1800, "fetched_at": datetime.utcnow().isoformat()}
+            return {"court_blocks": blocks, "date": date, "facility_id": facility_id, "fetched_at": datetime.utcnow().isoformat()}
+    except Exception as e:
+        return {"court_blocks": [], "date": date, "error": str(e)[:200]}
+
+# ── Stripe ────────────────────────────────────────────────────────────────────
+
+class StripeConnectRequest(BaseModel):
+    user_id: str
+    return_url: str = "https://picklematch.com.au/profile"
+    refresh_url: str = "https://picklematch.com.au/profile"
+
+class PaymentIntentRequest(BaseModel):
+    user_id: str
+    session_id: str
+    host_user_id: str
+    amount: int  # in cents
+    currency: str = "aud"
+    description: str = "PickleMatch session"
+
+class RefundRequest(BaseModel):
+    user_id: str
+    session_id: str
+    participant_id: str
+
+@app.get("/api/stripe/config")
+async def stripe_config():
+    """Return publishable key for frontend."""
+    return {"publishable_key": STRIPE_PUBLISHABLE_KEY}
+
+@app.post("/api/stripe/connect")
+async def stripe_connect(req: StripeConnectRequest):
+    """Create or retrieve a Stripe Connect account for a host and return onboarding link."""
+    if not STRIPE_SECRET_KEY:
+        raise HTTPException(status_code=500, detail="Stripe not configured")
+    svc_headers = {
+        "apikey": SUPABASE_SERVICE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+        "Content-Type": "application/json",
+    }
+    # Check if user already has a Stripe account
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        r = await client.get(
+            f"{SUPABASE_URL}/rest/v1/profiles?id=eq.{req.user_id}&select=stripe_account_id,stripe_onboarded",
+            headers=svc_headers,
+        )
+        profile = r.json()[0] if r.json() else {}
+        account_id = profile.get("stripe_account_id")
+
+    # Create new Express account if needed
+    if not account_id:
+        account = stripe.Account.create(
+            type="express",
+            country="AU",
+            capabilities={
+                "card_payments": {"requested": True},
+                "transfers": {"requested": True},
+            },
+        )
+        account_id = account.id
+        # Save to Supabase
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            await client.patch(
+                f"{SUPABASE_URL}/rest/v1/profiles?id=eq.{req.user_id}",
+                headers=svc_headers,
+                json={"stripe_account_id": account_id, "stripe_onboarded": False},
+            )
+
+    # Create account link for onboarding
+    account_link = stripe.AccountLink.create(
+        account=account_id,
+        refresh_url=req.refresh_url,
+        return_url=req.return_url,
+        type="account_onboarding",
+    )
+    return {"url": account_link.url, "account_id": account_id}
+
+@app.get("/api/stripe/status/{user_id}")
+async def stripe_status(user_id: str):
+    """Check if host has completed Stripe onboarding."""
+    if not STRIPE_SECRET_KEY:
+        return {"onboarded": False}
+    svc_headers = {
+        "apikey": SUPABASE_SERVICE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+    }
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        r = await client.get(
+            f"{SUPABASE_URL}/rest/v1/profiles?id=eq.{user_id}&select=stripe_account_id,stripe_onboarded",
+            headers=svc_headers,
+        )
+        profile = r.json()[0] if r.json() else {}
+        account_id = profile.get("stripe_account_id")
+        if not account_id:
+            return {"onboarded": False, "account_id": None}
+
+    # Verify with Stripe
+    try:
+        account = stripe.Account.retrieve(account_id)
+        onboarded = account.charges_enabled and account.payouts_enabled
+        if onboarded and not profile.get("stripe_onboarded"):
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                await client.patch(
+                    f"{SUPABASE_URL}/rest/v1/profiles?id=eq.{user_id}",
+                    headers={"apikey": SUPABASE_SERVICE_KEY, "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}", "Content-Type": "application/json"},
+                    json={"stripe_onboarded": True},
+                )
+        return {"onboarded": onboarded, "account_id": account_id}
+    except Exception as e:
+        return {"onboarded": False, "account_id": account_id, "error": str(e)}
+
+@app.post("/api/stripe/payment_intent")
+async def create_payment_intent(req: PaymentIntentRequest):
+    """Create a PaymentIntent for a player joining a session."""
+    if not STRIPE_SECRET_KEY:
+        raise HTTPException(status_code=500, detail="Stripe not configured")
+    svc_headers = {
+        "apikey": SUPABASE_SERVICE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+    }
+    # Check if this is an official PickleMatch session
+    is_official = False
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        r = await client.get(
+            f"{SUPABASE_URL}/rest/v1/created_sessions?id=eq.{req.session_id}&select=is_official",
+            headers=svc_headers,
+        )
+        session_data = r.json()[0] if r.json() else {}
+        is_official = session_data.get("is_official", False)
+
+    if is_official:
+        intent = stripe.PaymentIntent.create(
+            amount=req.amount,
+            currency=req.currency,
+            description=req.description,
+            metadata={
+                "session_id": req.session_id,
+                "player_user_id": req.user_id,
+                "host_user_id": req.host_user_id,
+            },
+        )
+        return {
+            "client_secret": intent.client_secret,
+            "payment_intent_id": intent.id,
+            "account_id": None,
+        }
+
+    # Get host's Stripe account for Connect payment
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        r = await client.get(
+            f"{SUPABASE_URL}/rest/v1/profiles?id=eq.{req.host_user_id}&select=stripe_account_id,stripe_onboarded",
+            headers=svc_headers,
+        )
+        profile = r.json()[0] if r.json() else {}
+        account_id = profile.get("stripe_account_id")
+        if not account_id or not profile.get("stripe_onboarded"):
+            raise HTTPException(status_code=400, detail="Host has not completed Stripe setup")
+
+    intent = stripe.PaymentIntent.create(
+        amount=req.amount,
+        currency=req.currency,
+        description=req.description,
+        metadata={
+            "session_id": req.session_id,
+            "player_user_id": req.user_id,
+            "host_user_id": req.host_user_id,
+        },
+        stripe_account=account_id,
+    )
+    return {
+        "client_secret": intent.client_secret,
+        "payment_intent_id": intent.id,
+        "account_id": account_id,
+    }
+
+@app.post("/api/stripe/refund")
+async def process_refund(req: RefundRequest):
+    """Process a refund based on cancellation notice period."""
+    if not STRIPE_SECRET_KEY:
+        raise HTTPException(status_code=500, detail="Stripe not configured")
+    svc_headers = {
+        "apikey": SUPABASE_SERVICE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+    }
+    # Get participant payment details
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        r = await client.get(
+            f"{SUPABASE_URL}/rest/v1/session_participants?id=eq.{req.participant_id}&select=*",
+            headers=svc_headers,
+        )
+        participant = r.json()[0] if r.json() else {}
+        if not participant.get("paid") or not participant.get("payment_intent_id"):
+            raise HTTPException(status_code=400, detail="No payment found for this participant")
+
+        # Get session details for refund policy
+        r2 = await client.get(
+            f"{SUPABASE_URL}/rest/v1/created_sessions?id=eq.{req.session_id}&select=date,start_time,refund_policy",
+            headers=svc_headers,
+        )
+        session = r2.json()[0] if r2.json() else {}
+
+    # Calculate notice period
+    from datetime import datetime, timezone
+    session_dt = datetime.fromisoformat(f"{session['date']}T{session['start_time']}:00").replace(tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
+    hours_notice = (session_dt - now).total_seconds() / 3600
+
+    refund_policy = session.get("refund_policy", {})
+    full_hours = refund_policy.get("full_refund_hours", 24)
+    partial_hours = refund_policy.get("partial_refund_hours", 12)
+    partial_pct = refund_policy.get("partial_refund_pct", 50)
+    amount_paid = int(participant["amount_paid"] * 100)  # convert to cents
+
+    if hours_notice >= full_hours:
+        refund_amount = amount_paid
+        refund_pct = 100
+    elif hours_notice >= partial_hours:
+        refund_amount = int(amount_paid * partial_pct / 100)
+        refund_pct = partial_pct
+    else:
+        refund_amount = 0
+        refund_pct = 0
+
+    if refund_amount == 0:
+        return {"refunded": False, "reason": "Cancellation too close to session — no refund applicable", "refund_pct": 0}
+
+    # Get host's Stripe account
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        r = await client.get(
+            f"{SUPABASE_URL}/rest/v1/profiles?id=eq.{session.get('created_by', '')}&select=stripe_account_id",
+            headers=svc_headers,
+        )
+        host_profile = r.json()[0] if r.json() else {}
+        account_id = host_profile.get("stripe_account_id")
+
+    # Process refund via Stripe
+    refund = stripe.Refund.create(
+        payment_intent=participant["payment_intent_id"],
+        amount=refund_amount,
+        stripe_account=account_id,
+    )
+
+    # Update participant record
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        await client.patch(
+            f"{SUPABASE_URL}/rest/v1/session_participants?id=eq.{req.participant_id}",
+            headers={**svc_headers, "Content-Type": "application/json"},
+            json={
+                "refund_status": "refunded",
+                "refunded_at": now.isoformat(),
+                "refund_amount": refund_amount / 100,
+            },
+        )
+
+    return {
+        "refunded": True,
+        "refund_id": refund.id,
+        "refund_amount": refund_amount / 100,
+        "refund_pct": refund_pct,
+        "currency": "aud",
+    }
+
+@app.post("/api/stripe/webhook")
+async def stripe_webhook(request: Request):
+    """Handle Stripe webhook events."""
+    from fastapi import Request
+    payload = await request.body()
+    sig_header = request.headers.get("stripe-signature")
+    try:
+        event = stripe.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    svc_headers = {
+        "apikey": SUPABASE_SERVICE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+        "Content-Type": "application/json",
+    }
+
+    if event["type"] == "payment_intent.succeeded":
+        pi = event["data"]["object"]
+        session_id = pi["metadata"].get("session_id")
+        player_user_id = pi["metadata"].get("player_user_id")
+        amount = pi["amount_received"] / 100
+        if session_id and player_user_id:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                await client.patch(
+                    f"{SUPABASE_URL}/rest/v1/session_participants?session_id=eq.{session_id}&user_id=eq.{player_user_id}",
+                    headers=svc_headers,
+                    json={
+                        "paid": True,
+                        "paid_at": datetime.utcnow().isoformat(),
+                        "payment_intent_id": pi["id"],
+                        "amount_paid": amount,
+                    },
+                )
+
+    elif event["type"] == "account.updated":
+        account = event["data"]["object"]
+        if account.get("charges_enabled") and account.get("payouts_enabled"):
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                await client.patch(
+                    f"{SUPABASE_URL}/rest/v1/profiles?stripe_account_id=eq.{account['id']}",
+                    headers=svc_headers,
+                    json={"stripe_onboarded": True},
+                )
+
+    return {"received": True}
