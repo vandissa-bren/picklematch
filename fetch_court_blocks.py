@@ -33,6 +33,8 @@ PBP_SLUG_MAP = {
     1714: "RunwayPickleball",
     1733: "pickleballpowerhouse",
     1696: "picklezone",
+    1770: "rayapickleballclub",
+    1783: "PICKLE4REAL",
     1883: "TheJarHQ",
 }
 
@@ -54,6 +56,8 @@ VENUE_NAMES = {
     1714: "Runway Pickleball",
     1733: "Pickleball Powerhouse",
     1696: "Picklezone",
+    1770: "Raya Pickleball Club",
+    1783: "Pickle4Real",
     1883: "The Jar HQ | Maidstone",
 }
 
@@ -72,7 +76,14 @@ def sec_to_hhmm(sec: int) -> str:
 
 
 def get_shift(sec: int, target_date: date = None) -> str:
-    """Derive pricing shift from time of day, with weekend suffix if applicable."""
+    """
+    DEPRECATED — was a hardcoded 12pm/5pm guess applied to every venue,
+    which is wrong for venues whose real shift boundaries differ (e.g.
+    SportsWell's weekday primetime actually starts at 4pm, not 5pm).
+    PBP returns the real shift directly on each available_hours slot now
+    (see fetch_blocks_for_surface), so this is no longer used for pricing.
+    Kept only as a last-resort fallback if PBP ever omits the shift field.
+    """
     hour = sec // 3600
     if hour >= 17:
         shift = "primetime"
@@ -85,19 +96,25 @@ def get_shift(sec: int, target_date: date = None) -> str:
     return shift
 
 
-async def fetch_blocks_for_surface(api, facility_id: int, target_date: date, surface: str) -> dict:
-    """Fetch court_slots for one surface type. Returns {court_key: [secs]}"""
+async def fetch_blocks_for_surface(api, facility_id: int, target_date: date, surface: str) -> tuple:
+    """Fetch court_slots for one surface type. Returns ({court_key: [secs]}, {sec: real_pbp_shift})."""
     court_slots = {}
+    sec_shift_map = {}
     try:
         hours_data = await api.available_hours(facility_id, target_date, surface=surface)
         all_slots = (hours_data or {}).get("available_hours", []) if isinstance(hours_data, dict) else []
 
-        valid_secs = [
-            int(s["seconds_from_midnight"])
-            for s in all_slots
-            if isinstance(s, dict) and s.get("available")
-            and isinstance(s.get("seconds_from_midnight"), (int, float))
-        ]
+        valid_secs = []
+        for s in all_slots:
+            if not (isinstance(s, dict) and s.get("available")
+                    and isinstance(s.get("seconds_from_midnight"), (int, float))):
+                continue
+            sec = int(s["seconds_from_midnight"])
+            valid_secs.append(sec)
+            # PBP tells us the real shift for this slot directly — no guessing needed.
+            real_shift = s.get("shift")
+            if real_shift:
+                sec_shift_map[sec] = real_shift
 
         for sec in valid_secs:
             try:
@@ -112,11 +129,25 @@ async def fetch_blocks_for_surface(api, facility_id: int, target_date: date, sur
                 print(f"    slot {sec_to_hhmm(sec)} error: {e}")
     except Exception as e:
         print(f"    surface {surface} error: {e}")
-    return court_slots
+    return court_slots, sec_shift_map
 
 
-def court_slots_to_blocks(court_slots: dict) -> list:
-    """Convert {court_key: [secs]} to list of bookable blocks >= 60 min."""
+def court_slots_to_blocks(court_slots: dict, sec_shift_map: dict = None) -> list:
+    # TODO(known issue, logged 2026-07-16): this assumes every venue books in
+    # 30-min increments (merge check is s == run_end + 1800). Some venues
+    # (e.g. SportsWell/885) actually book hourly, so genuinely consecutive
+    # available hours never merge into a >=60min block and get silently
+    # dropped. Needs the adjacency step to be detected per-venue rather than
+    # hardcoded. Deferred — not fixed in this pass, shift-guessing fix only.
+    """Convert {court_key: [secs]} to list of bookable blocks >= 60 min.
+
+    Runs are only merged while consecutive slots share the SAME real PBP shift —
+    a run is broken at a shift change (e.g. lowtime -> primetime) even if the
+    slots are otherwise back-to-back, since a merged block spanning two shifts
+    can't be priced correctly with a single cache key. Each resulting block
+    carries the real shift it belongs to.
+    """
+    sec_shift_map = sec_shift_map or {}
     blocks = []
     for court_key, secs in court_slots.items():
         parts = court_key.split("|", 1)
@@ -124,63 +155,58 @@ def court_slots_to_blocks(court_slots: dict) -> list:
         cname = parts[1] if len(parts) > 1 else court_key
         secs_sorted = sorted(set(secs))
         run_start = run_end = None
-        for s in secs_sorted:
-            if run_start is None:
-                run_start = run_end = s
-            elif s == run_end + 1800:
-                run_end = s
-            else:
-                dur = (run_end - run_start) // 60 + 30
-                if dur >= 60:
-                    blocks.append({
-                        "court": cname,
-                        "court_id": court_id,
-                        "start": sec_to_hhmm(run_start),
-                        "end": sec_to_hhmm(run_end + 1800),
-                        "start_sec": run_start,
-                        "duration_min": dur,
-                    })
-                run_start = run_end = s
-        if run_start is not None:
-            dur = (run_end - run_start) // 60 + 30
+        run_shift = None
+
+        def flush(rs, re_, shift):
+            dur = (re_ - rs) // 60 + 30
             if dur >= 60:
                 blocks.append({
                     "court": cname,
                     "court_id": court_id,
-                    "start": sec_to_hhmm(run_start),
-                    "end": sec_to_hhmm(run_end + 1800),
-                    "start_sec": run_start,
+                    "start": sec_to_hhmm(rs),
+                    "end": sec_to_hhmm(re_ + 1800),
+                    "start_sec": rs,
                     "duration_min": dur,
+                    "shift": shift,
                 })
+
+        for s in secs_sorted:
+            s_shift = sec_shift_map.get(s)
+            if run_start is None:
+                run_start = run_end = s
+                run_shift = s_shift
+            elif s == run_end + 1800 and s_shift == run_shift:
+                run_end = s
+            else:
+                flush(run_start, run_end, run_shift)
+                run_start = run_end = s
+                run_shift = s_shift
+        if run_start is not None:
+            flush(run_start, run_end, run_shift)
     return blocks
 
 
-async def fetch_missing_prices(api, blocks: list, target_date: date, user_id: int, existing_prices: dict) -> tuple[dict, dict]:
+async def fetch_missing_prices(api, blocks: list, target_date: date, user_id: int, existing_prices: dict) -> dict:
     """
     Fetch prices only for court/shift combos not already in existing_prices.
-    Uses PBP's actual shift name as cache key, stores a mapping of
-    derived_shift -> pbp_shift for use in apply_prices_to_blocks.
-    Returns (updated_prices, shift_map) where shift_map is {court_id: {derived_shift: pbp_shift}}
+    Cache key is court_id + PBP's REAL shift for that block (attached in
+    court_slots_to_blocks from the available_hours response) — no more
+    guessing/deriving the shift from time of day.
     """
     new_prices = dict(existing_prices)
-    shift_map = {}  # {court_id: {derived_shift: pbp_shift}}
 
     for block in blocks:
         court_id = block.get("court_id")
         start_sec = block.get("start_sec")
         if not court_id or start_sec is None:
             continue
-        shift = get_shift(start_sec, target_date)
+        # Real PBP shift if we have it; last-resort fallback to the old guess
+        # only if PBP omitted the shift field for this slot (shouldn't normally happen).
+        shift = block.get("shift") or get_shift(start_sec, target_date)
         cache_key = f"{court_id}_{shift}"
 
-        # Check if we already have price under derived key or any existing key for this court
         if cache_key in new_prices:
             continue
-        # Also skip if we already fetched PBP shift for this court/time
-        if court_id in shift_map and shift in shift_map[court_id]:
-            pbp_shift = shift_map[court_id][shift]
-            if f"{court_id}_{pbp_shift}" in new_prices:
-                continue
 
         try:
             price_data = await api.court_price(
@@ -188,49 +214,23 @@ async def fetch_missing_prices(api, blocks: list, target_date: date, user_id: in
             )
             fare = (price_data or {}).get("total", {}).get("original_reservation_fare")
             price = round(float(fare), 2) if fare is not None else None
-
-            # Use PBP's actual shift name if available
-            try:
-                pbp_shift = price_data["prices_per_user"][0]["price"]["shift_prices"][0]["shift"]
-                pbp_key = f"{court_id}_{pbp_shift}"
-                new_prices[pbp_key] = price
-                # Also store under derived key so lookup works
-                new_prices[cache_key] = price
-                # Record mapping for this court
-                shift_map.setdefault(court_id, {})[shift] = pbp_shift
-                print(f"    Fetched price {pbp_key} (pbp shift '{pbp_shift}'): ${price}")
-            except (KeyError, IndexError, TypeError):
-                new_prices[cache_key] = price
-                print(f"    Fetched price {cache_key}: ${price}")
-
+            new_prices[cache_key] = price
+            print(f"    Fetched price {cache_key}: ${price}")
             await asyncio.sleep(0.3)
         except Exception as e:
             print(f"    price error {cache_key}: {e}")
             new_prices[cache_key] = None
 
-    return new_prices, shift_map
+    return new_prices
 
 
-def apply_prices_to_blocks(blocks: list, court_prices: dict, shift_map: dict, target_date: date = None) -> list:
-    """
-    Map stored prices onto blocks.
-    Tries PBP shift key first, falls back to derived shift key.
-    """
+def apply_prices_to_blocks(blocks: list, court_prices: dict) -> list:
+    """Map stored prices onto blocks using each block's real PBP shift."""
     result = []
     for block in blocks:
         court_id = block.get("court_id")
-        start_sec = block.get("start_sec")
-        shift = get_shift(start_sec, target_date) if start_sec is not None else None
-        price = None
-
-        if court_id and shift:
-            # Try PBP shift name first
-            pbp_shift = (shift_map.get(court_id) or {}).get(shift)
-            if pbp_shift:
-                price = court_prices.get(f"{court_id}_{pbp_shift}")
-            # Fall back to derived shift key
-            if price is None:
-                price = court_prices.get(f"{court_id}_{shift}")
+        shift = block.get("shift")
+        price = court_prices.get(f"{court_id}_{shift}") if court_id and shift else None
 
         result.append({
             "court": block["court"],
@@ -242,10 +242,10 @@ def apply_prices_to_blocks(blocks: list, court_prices: dict, shift_map: dict, ta
     return result
 
 
-async def fetch_court_blocks_for_venue(api, facility_id: int, target_date: date, user_id: int, existing_prices: dict, existing_shift_map: dict) -> tuple:
+async def fetch_court_blocks_for_venue(api, facility_id: int, target_date: date, user_id: int, existing_prices: dict) -> tuple:
     """
     Fetch available court blocks for one venue on one date.
-    Returns (blocks_with_prices, updated_court_prices, updated_shift_map).
+    Returns (blocks_with_prices, updated_court_prices).
     """
     try:
         if facility_id in VENUE_SURFACES:
@@ -262,25 +262,22 @@ async def fetch_court_blocks_for_venue(api, facility_id: int, target_date: date,
             surfaces = [surface]
 
         combined_slots: dict = {}
+        combined_shift_map: dict = {}
         for surface in surfaces:
-            slots = await fetch_blocks_for_surface(api, facility_id, target_date, surface)
+            slots, sec_shift_map = await fetch_blocks_for_surface(api, facility_id, target_date, surface)
             for k, v in slots.items():
                 combined_slots.setdefault(k, []).extend(v)
+            combined_shift_map.update(sec_shift_map)
             await asyncio.sleep(0.5)
 
-        blocks = court_slots_to_blocks(combined_slots)
-        updated_prices, new_shift_map = await fetch_missing_prices(api, blocks, target_date, user_id, existing_prices)
-
-        # Merge shift maps
-        for court_id, mapping in new_shift_map.items():
-            existing_shift_map.setdefault(court_id, {}).update(mapping)
-
-        blocks_with_prices = apply_prices_to_blocks(blocks, updated_prices, existing_shift_map, target_date)
-        return blocks_with_prices, updated_prices, existing_shift_map
+        blocks = court_slots_to_blocks(combined_slots, combined_shift_map)
+        updated_prices = await fetch_missing_prices(api, blocks, target_date, user_id, existing_prices)
+        blocks_with_prices = apply_prices_to_blocks(blocks, updated_prices)
+        return blocks_with_prices, updated_prices
 
     except Exception as e:
         print(f"  Error fetching {facility_id} for {target_date}: {e}")
-        return [], existing_prices, existing_shift_map
+        return [], existing_prices
 
 
 async def main():
@@ -320,26 +317,23 @@ async def main():
 
     for fid, slug in PBP_SLUG_MAP.items():
         name = VENUE_NAMES.get(fid, str(fid))
-        results_by_venue[fid] = {"by_date": {}, "court_prices": {}, "shift_map": {}}
+        results_by_venue[fid] = {"by_date": {}, "court_prices": {}}
 
         existing_record = records_by_fid.get(fid, {})
         existing_data = existing_record.get("data", {})
         existing_prices = existing_data.get("court_prices", {})
-        existing_shift_map = existing_data.get("shift_map", {})
 
         try:
             async with PlayByPointAPI(cookies=cookies, club_slug=slug) as api:
                 api._user_id = user_id
                 updated_prices = existing_prices.copy()
-                updated_shift_map = existing_shift_map.copy()
                 for target_date in dates:
                     date_str = target_date.isoformat()
-                    blocks, updated_prices, updated_shift_map = await fetch_court_blocks_for_venue(
-                        api, fid, target_date, user_id, updated_prices, updated_shift_map
+                    blocks, updated_prices = await fetch_court_blocks_for_venue(
+                        api, fid, target_date, user_id, updated_prices
                     )
                     results_by_venue[fid]["by_date"][date_str] = blocks
                     results_by_venue[fid]["court_prices"] = updated_prices
-                    results_by_venue[fid]["shift_map"] = updated_shift_map
                     print(f"  {name} {date_str}: {len(blocks)} blocks")
                     await asyncio.sleep(1)
         except Exception as e:
@@ -359,7 +353,6 @@ async def main():
                 by_date[date_str] = blocks
             data["by_date"] = by_date
             data["court_prices"] = results_by_venue[fid]["court_prices"]
-            data["shift_map"] = results_by_venue[fid]["shift_map"]
             await client.patch(
                 f"{SUPABASE_URL}/rest/v1/availability_cache",
                 params={"id": f"eq.{row_id}"},

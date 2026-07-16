@@ -43,15 +43,6 @@ PBP_HEADERS = {
 }
 
 
-def get_shift(sec: int) -> str:
-    hour = sec // 3600
-    if hour >= 17:
-        return "primetime"
-    elif hour >= 12:
-        return "day"
-    return "lowtime"
-
-
 async def get_credentials(supabase_user_id: str, client: httpx.AsyncClient):
     r = await client.get(
         f"{SUPABASE_URL}/rest/v1/pbp_credentials",

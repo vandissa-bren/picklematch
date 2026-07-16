@@ -1371,16 +1371,22 @@ async def live_courts(
                 except Exception:
                     surfaces = ["pickleball"]
             court_slots: dict = {}
+            sec_shift_map: dict = {}
             for surface in surfaces:
                 try:
                     hours_data = await api.available_hours(facility_id, target_date, surface=surface)
                     all_slots = (hours_data or {}).get("available_hours", []) if isinstance(hours_data, dict) else []
-                    valid_secs = [
-                        int(s["seconds_from_midnight"])
-                        for s in all_slots
-                        if isinstance(s, dict) and s.get("available")
-                        and isinstance(s.get("seconds_from_midnight"), (int, float))
-                    ]
+                    valid_secs = []
+                    for s in all_slots:
+                        if not (isinstance(s, dict) and s.get("available")
+                                and isinstance(s.get("seconds_from_midnight"), (int, float))):
+                            continue
+                        sec = int(s["seconds_from_midnight"])
+                        valid_secs.append(sec)
+                        # PBP tells us the real shift directly -- no need to guess from time of day.
+                        real_shift = s.get("shift")
+                        if real_shift:
+                            sec_shift_map[sec] = real_shift
                     for sec in valid_secs:
                         try:
                             courts = await api.available_courts(facility_id, target_date, sec, sec + 1800, surface=surface)
@@ -1394,7 +1400,10 @@ async def live_courts(
                             pass
                 except Exception:
                     pass
-            # Convert to blocks
+            # Convert to blocks -- split at real shift boundaries (a run of
+            # slots is only merged while PBP's own shift label stays the same,
+            # so a 3pm-5pm run spanning lowtime->primetime becomes two blocks
+            # instead of being priced under a single wrong guessed shift).
             def sec_to_hhmm(sec):
                 return f"{int(sec)//3600:02d}:{(int(sec)%3600)//60:02d}"
             blocks = []
@@ -1404,43 +1413,34 @@ async def live_courts(
                 cname = parts[1] if len(parts) > 1 else court_key
                 secs_sorted = sorted(set(secs))
                 run_start = run_end = None
+                run_shift = None
                 for s in secs_sorted:
+                    s_shift = sec_shift_map.get(s)
                     if run_start is None:
                         run_start = run_end = s
-                    elif s == run_end + 1800:
+                        run_shift = s_shift
+                    elif s == run_end + 1800 and s_shift == run_shift:
                         run_end = s
                     else:
                         dur = (run_end - run_start) // 60 + 30
                         if dur >= 60:
-                            blocks.append({"court": cname, "court_id": court_id, "start": sec_to_hhmm(run_start), "end": sec_to_hhmm(run_end + 1800), "duration_min": dur, "price": None})
+                            blocks.append({"court": cname, "court_id": court_id, "start": sec_to_hhmm(run_start), "end": sec_to_hhmm(run_end + 1800), "duration_min": dur, "price": None, "shift": run_shift})
                         run_start = run_end = s
+                        run_shift = s_shift
                 if run_start is not None:
                     dur = (run_end - run_start) // 60 + 30
                     if dur >= 60:
-                        blocks.append({"court": cname, "court_id": court_id, "start": sec_to_hhmm(run_start), "end": sec_to_hhmm(run_end + 1800), "duration_min": dur, "price": None})
-            # Get prices from cache
+                        blocks.append({"court": cname, "court_id": court_id, "start": sec_to_hhmm(run_start), "end": sec_to_hhmm(run_end + 1800), "duration_min": dur, "price": None, "shift": run_shift})
+            # Get prices from cache -- keyed by court_id + REAL PBP shift, same
+            # scheme fetch_court_blocks.py now uses.
             try:
                 supabase_data = await _read_from_supabase("playbypoint")
                 cached = next((r for r in supabase_data if r.get("id") == facility_id), {})
                 court_prices = cached.get("court_prices", {})
-                shift_map = cached.get("shift_map", {})
-                isWeekend = target_date.weekday() >= 5
                 for block in blocks:
                     cid = block["court_id"]
-                    hour = int(block["start"].split(":")[0])
-                    if hour >= 17:
-                        shift = "primetime"
-                    elif hour >= 12:
-                        shift = "day"
-                    else:
-                        shift = "lowtime"
-                    if isWeekend:
-                        shift = f"{shift}_weekend"
-                    pbp_shift = (shift_map.get(cid) or {}).get(shift)
-                    price = court_prices.get(f"{cid}_{pbp_shift}") if pbp_shift else None
-                    if price is None:
-                        price = court_prices.get(f"{cid}_{shift}")
-                    block["price"] = price
+                    shift = block.get("shift")
+                    block["price"] = court_prices.get(f"{cid}_{shift}") if shift else None
             except Exception:
                 pass
             import time as _time
