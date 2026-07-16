@@ -28,6 +28,7 @@ jobs:
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           PBP_COOKIES_JSON: ${{ secrets.PBP_COOKIES_JSON }}
           DAYS_AHEAD: '2'
+          PRICE_REFRESH_HOURS: '168'
         run: python fetch_court_blocks.py
 
   fetch-mid:
@@ -47,6 +48,7 @@ jobs:
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           PBP_COOKIES_JSON: ${{ secrets.PBP_COOKIES_JSON }}
           DAYS_AHEAD: '8'
+          PRICE_REFRESH_HOURS: '168'
         run: python fetch_court_blocks.py
 
   fetch-far:
@@ -67,4 +69,5 @@ jobs:
           PBP_COOKIES_JSON: ${{ secrets.PBP_COOKIES_JSON }}
           DAYS_AHEAD: '14'
           DAYS_START: '8'
+          PRICE_REFRESH_HOURS: '168'
         run: python fetch_court_blocks.py
