@@ -1,0 +1,27 @@
+name: Fetch Member Court Prices
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 */6 * * *'  # every 6 hours
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install httpx curl_cffi
+
+      - name: Fetch member prices
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          ESTA_SUPABASE_USER_ID: ${{ secrets.ESTA_SUPABASE_USER_ID }}
+        run: python fetch_member_prices.py

@@ -1,0 +1,31 @@
+name: Daily Session Scrape
+
+on:
+  schedule:
+    - cron: '0 15 * * *'
+  workflow_dispatch:
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install httpx curl_cffi loguru python-dotenv rich supabase typer tenacity playwright
+          playwright install chromium
+
+      - name: Run session scrape
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          PBP_COOKIES_JSON: ${{ secrets.PBP_COOKIES_JSON }}
+          PROXY_URL: ""
+        run: |
+          python push_to_supabase.py

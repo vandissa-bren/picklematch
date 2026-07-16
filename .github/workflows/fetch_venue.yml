@@ -1,0 +1,30 @@
+name: Fetch Single Venue
+on:
+  workflow_dispatch:
+    inputs:
+      facility_id:
+        description: 'Facility ID to scrape (e.g. 1557 for Dink & Drive)'
+        required: true
+        type: string
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: |
+          pip install httpx curl_cffi loguru python-dotenv rich supabase typer tenacity playwright
+          playwright install chromium
+      - name: Fetch venue
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          PBP_COOKIES_JSON: ${{ secrets.PBP_COOKIES_JSON }}
+          FACILITY_ID: ${{ inputs.facility_id }}
+        run: |
+          python fetch_venue.py
