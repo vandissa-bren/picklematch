@@ -112,8 +112,14 @@ async def fetch_blocks_for_surface(api, facility_id: int, target_date: date, sur
             sec = int(s["seconds_from_midnight"])
             valid_secs.append(sec)
             # PBP tells us the real shift for this slot directly — no guessing needed.
+            # But PBP can reuse the SAME shift label (e.g. "primetime") for both
+            # weekday and weekend even when the real price genuinely differs
+            # (e.g. a weekend special). Tag with weekday/weekend so those don't
+            # collide under one cache key.
             real_shift = s.get("shift")
             if real_shift:
+                if target_date.weekday() >= 5:
+                    real_shift = f"{real_shift}_weekend"
                 sec_shift_map[sec] = real_shift
 
         for sec in valid_secs:

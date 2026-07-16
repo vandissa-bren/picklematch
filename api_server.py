@@ -1384,8 +1384,13 @@ async def live_courts(
                         sec = int(s["seconds_from_midnight"])
                         valid_secs.append(sec)
                         # PBP tells us the real shift directly -- no need to guess from time of day.
+                        # Same shift label can mean a different real price on weekends
+                        # (e.g. a weekend special), so tag with weekday/weekend to avoid
+                        # weekday and weekend prices colliding under one cache key.
                         real_shift = s.get("shift")
                         if real_shift:
+                            if target_date.weekday() >= 5:
+                                real_shift = f"{real_shift}_weekend"
                             sec_shift_map[sec] = real_shift
                     for sec in valid_secs:
                         try:
