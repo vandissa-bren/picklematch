@@ -1181,10 +1181,17 @@ async def pbp_connect(req: ConnectRequest):
                     )
         except Exception:
             pass
-        # Step 5: Sync memberships via booking server (fire and forget)
+        # Step 5: Sync memberships and rating via booking server (fire and forget).
+        # The inline DUPR fetch above (Step 4) uses cookies still mid-connection
+        # and can silently fail (broad except/pass, no logging). This call
+        # re-reads the now-persisted session cookies instead, which testing
+        # confirmed reliably works even when Step 4 doesn't -- so it's not
+        # just a duplicate, it's the actual fix for new users never getting
+        # a rating synced.
         try:
             async with httpx.AsyncClient(timeout=15.0) as _mc:
                 await _mc.post(f"https://booking.picklematch.com.au/api/sync_memberships/{req.user_id}")
+                await _mc.post(f"https://booking.picklematch.com.au/api/sync_rating/{req.user_id}")
         except Exception:
             pass
 
