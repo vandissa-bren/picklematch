@@ -12,9 +12,12 @@ import httpx
 from datetime import datetime, timezone
 from email import message_from_bytes
 from email.header import decode_header
+from dotenv import load_dotenv
+
+load_dotenv()
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://stwohmddmdwttasbyblt.supabase.co")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InN0d29obWRkbWR3dHRhc2J5Ymx0Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3ODcyNDc5MywiZXhwIjoyMDk0MzAwNzkzfQ.zrsXJVxX4OZv0Eb5qycQF3_33NFyAFJfPlvK_xCzi-E")
+SUPABASE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
 GMAIL_TOKEN_PATH = "/app/.gmail_token.json"
 
 VENUE_NAME_MAP = {
@@ -66,6 +69,8 @@ FACILITY_ID_MAP = {
     "PICKLE4REAL": 1783,
     "SportsWell | Pickleball Palace": 885,
 }
+
+UNMATCHED_LOG_PATH = "/app/unmatched_announcements.log"
 
 SKIP_SUBJECTS = [
     "welcome to",
@@ -209,6 +214,25 @@ def extract_venue_name(sender, subject, body):
     return first_line[:100] if first_line else "Unknown Venue"
 
 
+def log_unmatched(sender, subject, body, sent_at):
+    """
+    Record an email we couldn't match to a known venue, instead of silently
+    discarding it. This is the actual fix for announcements going missing --
+    previously, any email that didn't match a known venue name pattern was
+    marked read and lost forever with no record anywhere.
+    """
+    try:
+        with open(UNMATCHED_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(f"\n{'=' * 60}\n")
+            f.write(f"time: {datetime.now(timezone.utc).isoformat()}\n")
+            f.write(f"sent_at: {sent_at}\n")
+            f.write(f"sender: {sender}\n")
+            f.write(f"subject: {subject}\n")
+            f.write(f"body (first 300 chars): {body[:300]}\n")
+    except Exception as e:
+        print(f"    Failed to write unmatched log: {e}")
+
+
 def mark_as_read(access_token, msg_id):
     httpx.post(
         f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{msg_id}/modify",
@@ -329,9 +353,11 @@ def main():
                     announcement_id = abs(hash(f"{facility_id}-{subject}-{sent_at}")) % (10**9)
                     extract_codes_from_text(body, venue_name, facility_id, announcement_id, sent_at)
                 else:
-                    print(f"    x Failed to store")
+                    print(f"    x Failed to store -- logged for review, left unread to retry")
+                    log_unmatched(sender, subject, body, sent_at)
             else:
-                print(f"    x Could not match to known venue -- skipping")
+                print(f"    x Could not match to known venue -- logged for review")
+                log_unmatched(sender, subject, body, sent_at)
                 mark_as_read(access_token, msg_id)
 
         except Exception as e:
