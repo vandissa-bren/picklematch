@@ -27,6 +27,7 @@ VENUE_NAME_MAP = {
     "pickleholic": "PICKLEHOLIC",
     "statepickleballcentre": "State Pickleball Centre",
     "melbournepickleclub": "Melbourne Pickle Club",
+    "melbournepickle": "Melbourne Pickle Club",  # real sender slug omits "club"
     "picklehaus": "Pickle Haus",
     "leveluppickleballknoxcity": "Level Up Pickleball Knox City",
     "theroompickleball": "The Room Pickleball",
@@ -168,7 +169,9 @@ def extract_body(msg):
 
 
 def extract_venue_name(sender, subject, body):
-    sender_match = re.search(r"([\w\-]+)@playbypoint\.com", sender)
+    # Some venues send via a subdomain (e.g. mailing.playbypoint.com) rather
+    # than the bare domain -- match either.
+    sender_match = re.search(r"([\w\-]+)@(?:[\w\-]+\.)?playbypoint\.com", sender)
     if sender_match:
         slug = sender_match.group(1).lower().replace("-", "").replace("_", "")
         for key, name in VENUE_NAME_MAP.items():
@@ -193,6 +196,7 @@ def extract_venue_name(sender, subject, body):
         "pickleholic": "PICKLEHOLIC",
         "state pickleball": "State Pickleball Centre",
         "melbourne pickle": "Melbourne Pickle Club",
+        "mpc": "Melbourne Pickle Club",
         "pickle haus": "Pickle Haus",
         "level up": "Level Up Pickleball Knox City",
         "the room": "The Room Pickleball",
