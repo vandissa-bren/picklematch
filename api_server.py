@@ -43,6 +43,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 import stripe
 
 STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY", "")
+# The connected-accounts destination signs with its own secret.
+WEBHOOK_SECRET_CONNECT = os.environ.get("STRIPE_WEBHOOK_SECRET_CONNECT", "")
 STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
 STRIPE_PUBLISHABLE_KEY = os.environ.get("STRIPE_PUBLISHABLE_KEY", "pk_live_51TrY95K2PC6iTJ2oGj2s58hhTGMtSllc8hwCMyfX55jY8oWz8QeEVm4DpVRQDgWt1zI5Lg09kcSbK1cQdnHW0iZk00Pw42nNZn")
 
@@ -1800,10 +1802,28 @@ async def stripe_webhook(request: Request):
     from fastapi import Request
     payload = await request.body()
     sig_header = request.headers.get("stripe-signature")
-    try:
-        event = stripe.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    # ══ TWO DESTINATIONS, TWO SECRETS ═══════════════════════════════════
+    # Stripe splits events by source: the platform account sends onboarding
+    # and official-session payments, connected accounts send every host's own
+    # payments, refunds and disputes. A destination's source is fixed when it
+    # is created, so there must be two — and Stripe signs each with its own
+    # secret.
+    #
+    # Verified against either. With one secret, half the events fail signature
+    # verification and are rejected — silently from our side, and looking
+    # exactly like a webhook that is not being delivered at all, which is the
+    # fault this whole endpoint spent a month exhibiting.
+    secrets = [x for x in (STRIPE_WEBHOOK_SECRET, WEBHOOK_SECRET_CONNECT) if x]
+    event = None
+    last_error = None
+    for secret in secrets:
+        try:
+            event = stripe.Webhook.construct_event(payload, sig_header, secret)
+            break
+        except Exception as e:
+            last_error = e
+    if event is None:
+        raise HTTPException(status_code=400, detail=str(last_error or "no webhook secret configured"))
 
     svc_headers = {
         "apikey": SUPABASE_SERVICE_KEY,
@@ -1811,7 +1831,10 @@ async def stripe_webhook(request: Request):
         "Content-Type": "application/json",
     }
     kind = event["type"]
-    acct = event.get("account")          # set for connected-account events
+    # `construct_event` returns a StripeObject, not a dict: subscripting works,
+    # `.get` does not. Present only on connected-account events, so it must be
+    # read defensively rather than indexed.
+    acct = event["account"] if "account" in event else None
     obj = event["data"]["object"]
 
     async def notify(user_id: str, ntype: str, message: str, link=None):
@@ -1866,7 +1889,7 @@ async def stripe_webhook(request: Request):
 
     # ── a player has taken their money back ───────────────────────────────
     elif kind == "charge.dispute.created":
-        intent_id = obj.get("payment_intent")
+        intent_id = obj["payment_intent"] if "payment_intent" in obj else None
         p = await participant_by_intent(intent_id)
         if p:
             host_id, title = await host_of(p["session_id"])
@@ -1890,7 +1913,7 @@ async def stripe_webhook(request: Request):
 
     # ── a refund landed; the ledger should already know ───────────────────
     elif kind == "charge.refunded":
-        intent_id = obj.get("payment_intent")
+        intent_id = obj["payment_intent"] if "payment_intent" in obj else None
         async with httpx.AsyncClient(timeout=10.0) as client:
             r = await client.get(
                 f"{SUPABASE_URL}/rest/v1/refunds"
@@ -1911,14 +1934,15 @@ async def stripe_webhook(request: Request):
     # ── a payment came apart ──────────────────────────────────────────────
     elif kind == "payment_intent.payment_failed":
         p = await participant_by_intent(obj["id"])
-        err = (obj.get("last_payment_error") or {}).get("message", "")
+        lpe = obj["last_payment_error"] if "last_payment_error" in obj else None
+        err = (lpe["message"] if lpe and "message" in lpe else "")
         print(f"[webhook] PAYMENT FAILED {obj['id']} acct={acct} "
               f"participant={p['id'] if p else 'none'} — {err}", flush=True)
 
     # ── onboarding finished, without anyone asking ────────────────────────
     elif kind == "account.updated":
         account = obj
-        if account.get("charges_enabled") and account.get("payouts_enabled"):
+        if account["charges_enabled"] and account["payouts_enabled"]:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 await client.patch(
                     f"{SUPABASE_URL}/rest/v1/profiles?stripe_account_id=eq.{account['id']}",
