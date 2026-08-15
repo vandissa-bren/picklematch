@@ -1476,6 +1476,10 @@ class PaymentIntentRequest(BaseModel):
     currency: str = "aud"
     description: str = "PickleMatch session"
 
+class CaptureRequest(BaseModel):
+    session_id: str
+    payment_intent_id: str
+
 class RefundRequest(BaseModel):
     user_id: str
     session_id: str
@@ -1578,13 +1582,24 @@ async def create_payment_intent(req: PaymentIntentRequest):
     }
     # Check if this is an official PickleMatch session
     is_official = False
+    requires_approval = False
     async with httpx.AsyncClient(timeout=10.0) as client:
         r = await client.get(
-            f"{SUPABASE_URL}/rest/v1/created_sessions?id=eq.{req.session_id}&select=is_official",
+            f"{SUPABASE_URL}/rest/v1/created_sessions?id=eq.{req.session_id}&select=is_official,require_approval",
             headers=svc_headers,
         )
         session_data = r.json()[0] if r.json() else {}
         is_official = session_data.get("is_official", False)
+        requires_approval = session_data.get("require_approval", False)
+
+    # AUTHORISE NOW, CAPTURE ON APPROVAL. A session the host must agree to has
+    # not been agreed to yet, so the money must not move yet: the card is held
+    # and captured when they approve, or the hold is cancelled when they
+    # decline and nothing is ever taken. A player declined after being charged
+    # has to be refunded, which is the failure this removes.
+    #
+    # Sessions anyone can join capture immediately, exactly as before.
+    capture_method = "manual" if requires_approval else "automatic"
 
     if is_official:
         intent = stripe.PaymentIntent.create(
@@ -1596,11 +1611,15 @@ async def create_payment_intent(req: PaymentIntentRequest):
                 "player_user_id": req.user_id,
                 "host_user_id": req.host_user_id,
             },
+            capture_method=capture_method,
         )
         return {
             "client_secret": intent.client_secret,
             "payment_intent_id": intent.id,
             "account_id": None,
+            # The caller cannot tell a hold from a capture, and it writes
+            # `paid` from this result. Told, rather than left to guess.
+            "capture_method": capture_method,
         }
 
     # Get host's Stripe account for Connect payment
@@ -1624,12 +1643,126 @@ async def create_payment_intent(req: PaymentIntentRequest):
             "host_user_id": req.host_user_id,
         },
         stripe_account=account_id,
+        capture_method=capture_method,
     )
     return {
         "client_secret": intent.client_secret,
         "payment_intent_id": intent.id,
         "account_id": account_id,
+        "capture_method": capture_method,
     }
+
+async def _connected_account_for_session(session_id: str, svc_headers: dict) -> str:
+    """The host's Stripe account for a session.
+
+    The host column on `created_sessions` is `user_id`. `process_refund` reads
+    `created_by`, which is neither selected nor a real column, so it resolves
+    to empty and refunds run against the PLATFORM account instead of the
+    host's — which is why they fail.
+    """
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        r = await client.get(
+            f"{SUPABASE_URL}/rest/v1/created_sessions?id=eq.{session_id}&select=user_id",
+            headers=svc_headers,
+        )
+        row = r.json()[0] if r.json() else {}
+        host_id = row.get("user_id")
+        if not host_id:
+            raise HTTPException(status_code=404, detail="Session not found")
+        r2 = await client.get(
+            f"{SUPABASE_URL}/rest/v1/profiles?id=eq.{host_id}&select=stripe_account_id",
+            headers=svc_headers,
+        )
+        prof = r2.json()[0] if r2.json() else {}
+        account_id = prof.get("stripe_account_id")
+        if not account_id:
+            raise HTTPException(status_code=400, detail="Host has no Stripe account")
+        return account_id
+
+
+@app.post("/api/stripe/capture")
+async def capture_payment(req: CaptureRequest):
+    """Take money that has been held.
+
+    Called when a host approves. Everything before this point is an
+    authorisation: the funds are reserved and nothing has moved.
+
+    The database is NOT written here. Capturing fires
+    `payment_intent.succeeded`, and the webhook already sets `paid`, `paid_at`
+    and `amount_paid` from it — writing them here as well would be a second
+    author of the same fact.
+
+    Idempotent by Stripe's own behaviour: capturing an already-captured intent
+    returns an error naming that, which is reported rather than retried.
+    """
+    if not STRIPE_SECRET_KEY:
+        raise HTTPException(status_code=500, detail="Stripe not configured")
+    svc_headers = {
+        "apikey": SUPABASE_SERVICE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+    }
+    account_id = await _connected_account_for_session(req.session_id, svc_headers)
+    try:
+        intent = stripe.PaymentIntent.capture(
+            req.payment_intent_id,
+            stripe_account=account_id,
+        )
+    except stripe.error.StripeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    # WRITTEN HERE, because nothing else writes it. The webhook was the
+    # intended author and has never received an event: it listens on the
+    # PLATFORM account while every payment is a direct charge on the host's
+    # connected one, so `payment_intent.succeeded` has fired zero times since
+    # the endpoint was created.
+    #
+    # Synchronous suits this better anyway. The host approves, the money moves,
+    # and the row says so in the same round trip — rather than whenever Stripe
+    # gets round to delivering. The webhook is still worth fixing, as the way
+    # to hear about disputes, expired holds and failed captures; it is not the
+    # right place to learn that a payment the server just made succeeded.
+    amount = intent.amount_received / 100
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        await client.patch(
+            f"{SUPABASE_URL}/rest/v1/session_participants"
+            f"?payment_intent_id=eq.{req.payment_intent_id}",
+            headers={**svc_headers, "Content-Type": "application/json"},
+            json={
+                "paid": True,
+                "paid_at": datetime.utcnow().isoformat(),
+                "amount_paid": amount,
+            },
+        )
+    return {
+        "captured": True,
+        "amount": amount,
+        "status": intent.status,
+    }
+
+
+@app.post("/api/stripe/cancel")
+async def cancel_payment(req: CaptureRequest):
+    """Release a hold without taking anything.
+
+    Called when a host declines. The authorisation disappears and the player
+    is never charged — so there is no refund to owe, chase or reconcile, which
+    is the whole reason for holding rather than capturing at request.
+    """
+    if not STRIPE_SECRET_KEY:
+        raise HTTPException(status_code=500, detail="Stripe not configured")
+    svc_headers = {
+        "apikey": SUPABASE_SERVICE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+    }
+    account_id = await _connected_account_for_session(req.session_id, svc_headers)
+    try:
+        intent = stripe.PaymentIntent.cancel(
+            req.payment_intent_id,
+            stripe_account=account_id,
+        )
+    except stripe.error.StripeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"cancelled": True, "status": intent.status}
+
 
 @app.post("/api/stripe/refund")
 async def process_refund(req: RefundRequest):
