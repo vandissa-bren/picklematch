@@ -7,3 +7,9 @@ __pycache__/
 .pbp_cookies.json
 debug/
 *.png
+
+# Backups made before edits. Never committed: a pre-cleanup copy of a file
+# is by definition the version that still contains whatever was cleaned out.
+*.bak
+*.bak-*
+*.keybak
