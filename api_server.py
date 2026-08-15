@@ -1480,11 +1480,6 @@ class CaptureRequest(BaseModel):
     session_id: str
     payment_intent_id: str
 
-class RefundRequest(BaseModel):
-    user_id: str
-    session_id: str
-    participant_id: str
-
 @app.get("/api/stripe/config")
 async def stripe_config():
     """Return publishable key for frontend."""
@@ -1762,94 +1757,21 @@ async def cancel_payment(req: CaptureRequest):
     except stripe.error.StripeError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return {"cancelled": True, "status": intent.status}
-
-
-@app.post("/api/stripe/refund")
-async def process_refund(req: RefundRequest):
-    """Process a refund based on cancellation notice period."""
-    if not STRIPE_SECRET_KEY:
-        raise HTTPException(status_code=500, detail="Stripe not configured")
-    svc_headers = {
-        "apikey": SUPABASE_SERVICE_KEY,
-        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
-    }
-    # Get participant payment details
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        r = await client.get(
-            f"{SUPABASE_URL}/rest/v1/session_participants?id=eq.{req.participant_id}&select=*",
-            headers=svc_headers,
-        )
-        participant = r.json()[0] if r.json() else {}
-        if not participant.get("paid") or not participant.get("payment_intent_id"):
-            raise HTTPException(status_code=400, detail="No payment found for this participant")
-
-        # Get session details for refund policy
-        r2 = await client.get(
-            f"{SUPABASE_URL}/rest/v1/created_sessions?id=eq.{req.session_id}&select=date,start_time,refund_policy",
-            headers=svc_headers,
-        )
-        session = r2.json()[0] if r2.json() else {}
-
-    # Calculate notice period
-    from datetime import datetime, timezone
-    session_dt = datetime.fromisoformat(f"{session['date']}T{session['start_time']}:00").replace(tzinfo=timezone.utc)
-    now = datetime.now(timezone.utc)
-    hours_notice = (session_dt - now).total_seconds() / 3600
-
-    refund_policy = session.get("refund_policy", {})
-    full_hours = refund_policy.get("full_refund_hours", 24)
-    partial_hours = refund_policy.get("partial_refund_hours", 12)
-    partial_pct = refund_policy.get("partial_refund_pct", 50)
-    amount_paid = int(participant["amount_paid"] * 100)  # convert to cents
-
-    if hours_notice >= full_hours:
-        refund_amount = amount_paid
-        refund_pct = 100
-    elif hours_notice >= partial_hours:
-        refund_amount = int(amount_paid * partial_pct / 100)
-        refund_pct = partial_pct
-    else:
-        refund_amount = 0
-        refund_pct = 0
-
-    if refund_amount == 0:
-        return {"refunded": False, "reason": "Cancellation too close to session — no refund applicable", "refund_pct": 0}
-
-    # Get host's Stripe account
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        r = await client.get(
-            f"{SUPABASE_URL}/rest/v1/profiles?id=eq.{session.get('created_by', '')}&select=stripe_account_id",
-            headers=svc_headers,
-        )
-        host_profile = r.json()[0] if r.json() else {}
-        account_id = host_profile.get("stripe_account_id")
-
-    # Process refund via Stripe
-    refund = stripe.Refund.create(
-        payment_intent=participant["payment_intent_id"],
-        amount=refund_amount,
-        stripe_account=account_id,
-    )
-
-    # Update participant record
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        await client.patch(
-            f"{SUPABASE_URL}/rest/v1/session_participants?id=eq.{req.participant_id}",
-            headers={**svc_headers, "Content-Type": "application/json"},
-            json={
-                "refund_status": "refunded",
-                "refunded_at": now.isoformat(),
-                "refund_amount": refund_amount / 100,
-            },
-        )
-
-    return {
-        "refunded": True,
-        "refund_id": refund.id,
-        "refund_amount": refund_amount / 100,
-        "refund_pct": refund_pct,
-        "currency": "aud",
-    }
+# ══ /api/stripe/refund REMOVED — 15 Aug 2026 ═══════════════════════════
+# Unreachable, never functional, and a way for a second refund path to come
+# back. It resolved the host account through `created_by` — neither selected
+# nor a real column — so every call ran against the platform account rather
+# than the host's connected one and failed. Its only caller, a Refund button
+# on the legacy join page, sent three fields the model did not accept and so
+# failed validation before reaching Stripe.
+#
+# Refunds are now an obligation the DATABASE records the moment a paid place
+# is lost, settled by `settle_refunds.py` against the host's connected
+# account. One path, one ledger, and `refunds.payment_intent_id` is unique so
+# a charge cannot be refunded twice.
+#
+# Repairing this endpoint would have reintroduced exactly that: a manual
+# refund the ledger cannot see, alongside a worker settling the same debt.
 
 @app.post("/api/stripe/webhook")
 async def stripe_webhook(request: Request):
