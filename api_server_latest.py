@@ -135,7 +135,7 @@ app.add_middleware(
 
 # ── Supabase REST helper ─────────────────────────────────────────────────────
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://stwohmddmdwttasbyblt.supabase.co")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InN0d29obWRkbWR3dHRhc2J5Ymx0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg3MjQ3OTMsImV4cCI6MjA5NDMwMDc5M30.x7VcVmJZ35S1uZy9_SU5RlB_MnuLziX2v81y9l02Yy8")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
 PROXY_URL = os.environ.get("PROXY_URL")  # e.g. http://user:pass@p.webshare.io:80
 
 

@@ -8,6 +8,11 @@ Run hourly via cron. Push notifications must be disabled on phone so
 web notifications stay unread until this poller catches them.
 """
 import asyncio
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
 import json
 import os
 import re
@@ -17,7 +22,7 @@ from pathlib import Path
 from extract_thejar import PlayByPointAPI
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://stwohmddmdwttasbyblt.supabase.co")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InN0d29obWRkbWR3dHRhc2J5Ymx0Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3ODcyNDc5MywiZXhwIjoyMDk0MzAwNzkzfQ.zrsXJVxX4OZv0Eb5qycQF3_33NFyAFJfPlvK_xCzi-E")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
 
 FACILITY_NAMES = {
     597:  "The Jar | South Melbourne",

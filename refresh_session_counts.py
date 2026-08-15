@@ -4,12 +4,21 @@ Refreshes spots_left and status for today/tomorrow sessions only.
 Reads lesson_ids from Supabase, calls lesson_players API, updates counts.
 """
 import asyncio, json, os, httpx
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
 from datetime import date, timedelta
 from pathlib import Path
 from extract_thejar import PlayByPointAPI
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://stwohmddmdwttasbyblt.supabase.co")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InN0d29obWRkbWR3dHRhc2J5Ymx0Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3ODcyNDc5MywiZXhwIjoyMDk0MzAwNzkzfQ.zrsXJVxX4OZv0Eb5qycQF3_33NFyAFJfPlvK_xCzi-E")
+# The service key, under the name the rest of this server uses for it.
+# `SUPABASE_KEY` held a service-role token here for a month while
+# reading like the public anon key — the name is why it was pasted into
+# a file that went to a public repo.
+SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
 
 PBP_SLUG_MAP = {
     597: "nplpickleball", 885: "sportswellpickleballpalace", 1009: "easternindoorpickleballclub",

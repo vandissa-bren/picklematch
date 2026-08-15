@@ -138,7 +138,7 @@ app.add_middleware(
 
 # ── Supabase REST helper ─────────────────────────────────────────────────────
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://stwohmddmdwttasbyblt.supabase.co")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InN0d29obWRkbWR3dHRhc2J5Ymx0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg3MjQ3OTMsImV4cCI6MjA5NDMwMDc5M30.x7VcVmJZ35S1uZy9_SU5RlB_MnuLziX2v81y9l02Yy8")
 SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", SUPABASE_KEY)
 PROXY_URL = os.environ.get("PROXY_URL")  # e.g. http://user:pass@p.webshare.io:80
 
@@ -1709,32 +1709,9 @@ async def capture_payment(req: CaptureRequest):
         )
     except stripe.error.StripeError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    # WRITTEN HERE, because nothing else writes it. The webhook was the
-    # intended author and has never received an event: it listens on the
-    # PLATFORM account while every payment is a direct charge on the host's
-    # connected one, so `payment_intent.succeeded` has fired zero times since
-    # the endpoint was created.
-    #
-    # Synchronous suits this better anyway. The host approves, the money moves,
-    # and the row says so in the same round trip — rather than whenever Stripe
-    # gets round to delivering. The webhook is still worth fixing, as the way
-    # to hear about disputes, expired holds and failed captures; it is not the
-    # right place to learn that a payment the server just made succeeded.
-    amount = intent.amount_received / 100
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        await client.patch(
-            f"{SUPABASE_URL}/rest/v1/session_participants"
-            f"?payment_intent_id=eq.{req.payment_intent_id}",
-            headers={**svc_headers, "Content-Type": "application/json"},
-            json={
-                "paid": True,
-                "paid_at": datetime.utcnow().isoformat(),
-                "amount_paid": amount,
-            },
-        )
     return {
         "captured": True,
-        "amount": amount,
+        "amount": intent.amount_received / 100,
         "status": intent.status,
     }
 
