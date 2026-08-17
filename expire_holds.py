@@ -18,9 +18,9 @@ NO HOST IS PRESENT for either, which is why this cannot live in Host OS. A
 refund the host must press is not a policy, and neither is a release.
 
 CANCEL FIRST, THEN THE STATUS — the reverse of an interactive decline. There
-no decision to preserve: if the cancel fails, leaving the row `pending` means
-the next run tries again, whereas marking it rejected would strand the hold
-with nothing left to notice it.
+is no decision to preserve: if the cancel fails, leaving the row `pending`
+means the next run tries again, whereas marking it rejected would strand the
+hold with nothing left to notice it.
 
 Also REPORTS, without acting: approved participants whose payment was never
 captured. That is money a host is owed for a place already given, and
@@ -80,6 +80,130 @@ def session_started(sess) -> bool:
     except ValueError:
         return False
     return datetime.now() >= starts
+
+
+def release_abandoned_holds(client, accounts):
+    """Cancel authorisations nobody is going to capture.
+
+    ══ WHY THIS FILE OWNS IT ═════════════════════════════════════════════
+    The sweep above finds `status = 'pending'` rows. A player promoted off the
+    waitlist is `approved`, so a cancelled session left their money reserved
+    until Stripe dropped the hold about a week later — outside every existing
+    check.
+
+    `holds_to_release()` is how those reach this sweep. It also finds the
+    ORPHAN case a participant-keyed query structurally could not: an open
+    attempt whose player has rejoined and now points at a different hold.
+
+    ══ A "HOLD" MAY TURN OUT TO BE A PAYMENT ═════════════════════════════
+    The far end of the capture race: the waitlist worker captured the money
+    and died before recording it, and the session was cancelled in between.
+
+    Cancelling that intent fails. Clearing the flag and moving on would be a
+    captured payment with nothing in the database recording it — the same
+    discarded fact the capture worker exists to prevent, in a different place.
+
+    So a refusal is not a conclusion. The intent is RETRIEVED and its status
+    read, and `reconcile_captured_hold` routes a succeeded one back through
+    the ordinary settlement path — which records the payment and owes it back.
+    One success path, not two.
+    """
+    rows = client.post(f"{SUPABASE_URL}/rest/v1/rpc/holds_to_release",
+                       headers=HEADERS, json={})
+    if rows.status_code >= 300:
+        log(f"could not read abandoned holds — {rows.text[:80]}")
+        return 0
+    holds = rows.json() or []
+    if not holds:
+        return 0
+    log(f"{len(holds)} abandoned hold(s)")
+
+    done = 0
+    for h in holds:
+        intent = h["payment_intent_id"]
+        host_id = h.get("host_id")
+
+        if host_id not in accounts:
+            p = client.get(
+                f"{SUPABASE_URL}/rest/v1/profiles?id=eq.{host_id}"
+                "&select=stripe_account_id", headers=HEADERS,
+            )
+            prows = p.json() if p.status_code == 200 else []
+            accounts[host_id] = prows[0].get("stripe_account_id") if prows else None
+        acct = accounts[host_id]
+        if not acct:
+            log(f"SKIP {intent} — host has no Stripe account")
+            continue
+
+        if DRY:
+            log(f"WOULD RELEASE {intent}")
+            done += 1
+            continue
+
+        try:
+            stripe.PaymentIntent.cancel(intent, stripe_account=acct)
+
+        # ORDER MATTERS. These are subclasses of StripeError; below the general
+        # handler they would be unreachable, and an outage would be treated as
+        # a conclusion about the hold.
+        except (stripe.error.APIConnectionError, stripe.error.RateLimitError):
+            # Unknown, not failed. Left open for the next run.
+            log(f"DEFERRED {intent} — stripe unreachable")
+            continue
+
+        except stripe.error.StripeError as e:
+            # THE INTENT IS THE EVIDENCE. A refusal means Stripe would not
+            # cancel it in its current state; only retrieving it says which.
+            try:
+                pi = stripe.PaymentIntent.retrieve(intent, stripe_account=acct)
+            except stripe.error.StripeError:
+                log(f"FAILED {intent} — {str(e)[:70]}")
+                continue
+
+            if pi.status == "succeeded" and (pi.amount_received or 0) > 0:
+                # Captured, and never recorded. Settle it as the success it is;
+                # the database decides whether that reaches the roster or
+                # becomes a refund.
+                #
+                # AND THE RESULT IS CHECKED. Firing this and moving on would be
+                # followed by `mark_hold_released`, closing the attempt as
+                # RELEASED while Stripe held the money — the discarded
+                # financial fact, arrived at through the recovery path. A
+                # reconciliation that did not land leaves the attempt open, so
+                # the next run finds it again.
+                r = client.post(
+                    f"{SUPABASE_URL}/rest/v1/rpc/reconcile_captured_hold",
+                    headers=HEADERS,
+                    json={"p_intent": intent, "p_amount": pi.amount_received / 100},
+                )
+                if r.status_code >= 300:
+                    log(f"DEFERRED {intent} — captured, but reconciliation "
+                        f"failed: {r.text[:70]}")
+                    continue
+                log(f"RECONCILED {intent} — was captured, refund now owed")
+                done += 1
+                continue
+
+            if pi.status not in ("canceled", "cancelled"):
+                # Neither cancellable nor captured — leave it open so the next
+                # run looks again rather than forgetting about it.
+                log(f"DEFERRED {intent} — intent is {pi.status}")
+                continue
+            # Already cancelled: nothing to do but record it.
+
+        # Checked for the same reason: an unrecorded release leaves the attempt
+        # open, which is harmless — the next run cancels an already cancelled
+        # intent and records it then. Claiming it while the write failed is
+        # what is not.
+        r = client.post(f"{SUPABASE_URL}/rest/v1/rpc/mark_hold_released",
+                        headers=HEADERS, json={"p_intent": intent})
+        if r.status_code >= 300:
+            log(f"DEFERRED {intent} — released, but not recorded: {r.text[:70]}")
+            continue
+        log(f"RELEASED {intent}")
+        done += 1
+
+    return done
 
 
 def main():
@@ -206,6 +330,11 @@ def main():
                     f"session {o['session_id']} — someone is in and nobody was charged")
             if owed:
                 log(f"{len(owed)} approved participant(s) with money never taken")
+
+        # ── holds the sweep above cannot see ──────────────────────────────
+        # `+=`, not `=`. The two sweeps release different things and the total
+        # is both — assigning here would silently discard the count above.
+        released += release_abandoned_holds(client, accounts)
 
         log(f"done — {released} released{' (dry run)' if DRY else ''}")
     return 0
