@@ -1477,6 +1477,11 @@ class PaymentIntentRequest(BaseModel):
     amount: int  # in cents
     currency: str = "aud"
     description: str = "PickleMatch session"
+    # WHAT THE PAYMENT IS FOR, not how to take it. The server derives
+    # capture_method from this and the session's own settings; a client that
+    # could name the capture method could decide not to be charged.
+    # Defaults to "join" so an older client keeps its existing behaviour.
+    purpose: str = "join"
 
 class CaptureRequest(BaseModel):
     session_id: str
@@ -1589,14 +1594,24 @@ async def create_payment_intent(req: PaymentIntentRequest):
         is_official = session_data.get("is_official", False)
         requires_approval = session_data.get("require_approval", False)
 
-    # AUTHORISE NOW, CAPTURE ON APPROVAL. A session the host must agree to has
-    # not been agreed to yet, so the money must not move yet: the card is held
-    # and captured when they approve, or the hold is cancelled when they
-    # decline and nothing is ever taken. A player declined after being charged
-    # has to be refunded, which is the failure this removes.
+    # ══ HOLD OR CHARGE ═══════════════════════════════════════════════════
+    # AUTHORISE NOW, CAPTURE LATER wherever the place is not yet the player's:
+    # the card is held, and captured when it becomes theirs — or cancelled,
+    # and nothing is ever taken. A player charged for a place they never got
+    # has to be refunded, which is the failure this avoids.
     #
-    # Sessions anyone can join capture immediately, exactly as before.
-    capture_method = "manual" if requires_approval else "automatic"
+    # TWO PATHS NEED A HOLD, NOT ONE. This read `requires_approval` alone,
+    # which was correct while approval was the only reason to wait. A WAITLIST
+    # join also waits — for a place to open — and on an approval-off session it
+    # was therefore CHARGED at once, while the client recorded it as a hold.
+    # The worker recovered those with "ALREADY CAPTURED"; the intent should not
+    # have needed recovering.
+    #
+    #     join, approval off      automatic
+    #     join, approval on       manual — captured when the host approves
+    #     waitlist, either way    manual — captured when a place opens
+    is_waitlist = (req.purpose or "join").strip().lower() == "waitlist"
+    capture_method = "manual" if (requires_approval or is_waitlist) else "automatic"
 
     if is_official:
         intent = stripe.PaymentIntent.create(
