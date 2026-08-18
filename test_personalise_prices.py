@@ -114,6 +114,27 @@ check("personalisation happens AFTER _cache_set",
 check("cache key does not include the user", "user_id" not in
       full[full.index("cache_key ="):full.index("cache_key =") + 120], True)
 
+print("\n--- the PickleMatch user id must not be shadowed ---")
+# Both endpoints bind `user_id` locally to the PBP scraper id -- one by
+# assignment, one by tuple unpacking. When the query parameter shared that
+# name it was silently replaced, and the pricing service received PBP's
+# numeric id. It returned 422 and the response fell back to public prices,
+# which is indistinguishable from a member having no discount.
+import re as _re
+for _name in ("pbp_availability", "live_sessions"):
+    _f = [n for n in ast.parse(_src).body
+          if isinstance(n, ast.AsyncFunctionDef) and n.name == _name][0]
+    _s = ast.get_source_segment(_src, _f)
+    check(f"{_name}: parameter is pm_user_id", "pm_user_id" in _s, True)
+    check(f"{_name}: public query name preserved", 'alias="user_id"' in _s, True)
+    check(f"{_name}: no bare `user_id` param declaration",
+          "user_id: Optional[str] = Query" in _s, False)
+    # Every call into personalisation must pass the parameter, never the
+    # local PBP id.
+    _calls = _re.findall(r"_personalise\w*\([^)]*\)", _s)
+    check(f"{_name}: all personalisation calls use pm_user_id",
+          all("pm_user_id" in c for c in _calls) and len(_calls) > 0, True)
+
 print()
 if fails:
     print(f"{len(fails)} FAILURES:")

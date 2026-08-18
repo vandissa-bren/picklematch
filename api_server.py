@@ -712,7 +712,13 @@ async def pbp_availability(
     from_time: str = Query("16:00", alias="from"),
     to_time: str = Query("23:00", alias="to"),
     venue_ids: Optional[str] = Query(None, description="Comma-separated IDs, default all saved"),
-    user_id: Optional[str] = Query(None, description="PickleMatch user, for personalised pricing"),
+    # Named pm_user_id, not the obvious alternative:
+    # _load_session_with_env_fallback() below rebinds that shorter name to
+    # the PBP scraper id, which silently replaced the parameter on the
+    # cache-miss path. Personalisation therefore worked on a cache hit and
+    # failed on a miss, which is why it appeared intermittent.
+    pm_user_id: Optional[str] = Query(None, alias="user_id",
+                                      description="PickleMatch user, for personalised pricing"),
 ):
     """
     Get court blocks + sessions for PBP venues via live API calls through residential proxy.
@@ -744,7 +750,7 @@ async def pbp_availability(
         # AFTER the cache read, never before: the cache key has no user in
         # it, so personalising anything that gets stored would serve one
         # member's price to everyone.
-        return await _personalise_prices(cached_result, user_id)
+        return await _personalise_prices(cached_result, pm_user_id)
 
     slug_map = {k: v for k, v in PBP_SLUG_MAP.items() if not ids_filter or k in ids_filter}
 
@@ -792,7 +798,7 @@ async def pbp_availability(
     _cache_set(cache_key, response)
     # Personalise only the copy being returned. The object handed to
     # _cache_set above stays public.
-    return await _personalise_prices(response, user_id)
+    return await _personalise_prices(response, pm_user_id)
 
 
 @app.get("/api/pbp/venue/{facility_id}")
@@ -1387,10 +1393,10 @@ async def _personalise_live_sessions(sessions, user_id):
 async def live_sessions(
     facility_ids: str = Query(...),  # comma-separated facility IDs
     date: str = Query(...),          # YYYY-MM-DD
-    # NOT `user_id`: this function already binds that name to the PBP
-    # scraper id from the cookie file a few lines below, which silently
-    # overwrote the parameter and sent PBP's numeric id to the pricing
-    # service instead of the caller's UUID.
+    # Named pm_user_id, not the obvious alternative: this function already
+    # binds that shorter name to the PBP scraper id from the cookie file
+    # below, which silently overwrote the parameter and sent PBP's numeric
+    # id to the pricing service instead of the caller's UUID.
     pm_user_id: Optional[str] = Query(None, alias="user_id",
                                       description="PickleMatch user, for personalised pricing"),
 ):
