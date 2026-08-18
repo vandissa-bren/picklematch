@@ -632,16 +632,101 @@ async def pbp_venues():
     return {"venues": venues, "count": len(venues)}
 
 
+BOOKING_SERVER_URL = os.environ.get("BOOKING_SERVER_URL", "https://booking.picklematch.com.au")
+
+
+async def _personalise_prices(response, user_id):
+    """
+    Overlay `resolved_price` on sessions priced differently for this member.
+
+    Pricing authority stays in booking_server, which owns the resolver and
+    the affiliation data. Copying the matching rule here would recreate the
+    divergence this work removed, where two endpoints held two versions of
+    the same pricing logic and silently drifted apart.
+
+    ONE batched call for the whole page, not one per session: forty cards
+    cost a single request. It makes no PBP calls -- everything resolves
+    from cached tiers and the member's stored affiliation.
+
+    Enhancement, never a dependency. Any failure returns the response
+    untouched, so the sessions page keeps working with public prices if the
+    booking server is slow, down, or unreachable. Discovery must not break
+    because personalisation did.
+
+    Returns a COPY. The shared cache object is never mutated, so one user's
+    price cannot leak into another's response.
+    """
+    if not user_id or not isinstance(response, dict):
+        return response
+
+    venues = response.get("venues") or []
+    wanted = []
+    for v in venues:
+        fid = v.get("id")
+        for s in (v.get("sessions") or []):
+            if fid and s.get("lesson_id"):
+                wanted.append({"lesson_id": s["lesson_id"], "facility_id": fid})
+    if not wanted:
+        return response
+
+    try:
+        async with httpx.AsyncClient(timeout=6.0) as client:
+            r = await client.post(
+                f"{BOOKING_SERVER_URL}/api/resolve-prices",
+                json={"user_id": user_id, "sessions": wanted},
+                headers={"X-Internal-Key": SUPABASE_SERVICE_KEY or ""},
+            )
+        if r.status_code != 200:
+            return response
+        resolved = (r.json() or {}).get("resolved") or {}
+    except Exception as e:
+        print(f"personalised pricing unavailable: {e}", flush=True)
+        return response
+
+    if not resolved:
+        return response
+
+    # Copy only what is modified; the rest is shared by reference.
+    out = dict(response)
+    new_venues = []
+    for v in venues:
+        sessions = v.get("sessions") or []
+        if not any(str(s.get("lesson_id")) in resolved for s in sessions):
+            new_venues.append(v)
+            continue
+        nv = dict(v)
+        nv["sessions"] = [
+            {**s, "resolved_price": resolved[str(s.get("lesson_id"))]}
+            if str(s.get("lesson_id")) in resolved else s
+            for s in sessions
+        ]
+        new_venues.append(nv)
+    out["venues"] = new_venues
+    return out
+
+
 @app.get("/api/pbp/availability")
 async def pbp_availability(
     date: Optional[str] = Query(None, description="YYYY-MM-DD, default today"),
     from_time: str = Query("16:00", alias="from"),
     to_time: str = Query("23:00", alias="to"),
     venue_ids: Optional[str] = Query(None, description="Comma-separated IDs, default all saved"),
+    user_id: Optional[str] = Query(None, description="PickleMatch user, for personalised pricing"),
 ):
     """
     Get court blocks + sessions for PBP venues via live API calls through residential proxy.
     Falls back to Supabase cache if proxy calls fail.
+
+    When `user_id` is supplied, sessions where that member's price differs
+    gain a `resolved_price`. `price` is never modified, so callers read
+    `resolved_price ?? price` and anonymous responses are untouched.
+
+    `user_id` is an identity SELECTOR, not an authenticated claim -- anyone
+    could pass another user's id. Acceptable here because the endpoint
+    performs no writes and exposes no credentials or payment data; the only
+    consequence is seeing which cached price another account would be
+    shown. Matching the existing /api/pbp/connect pattern. Hardening API
+    identity is a separate change, not one to make inside a pricing fix.
     """
     target_date = (datetime.strptime(date, "%Y-%m-%d").date()
                    if date else datetime.today().date())
@@ -655,7 +740,10 @@ async def pbp_availability(
     # Check in-memory cache first
     cached_result = _cache_get(cache_key)
     if cached_result:
-        return cached_result
+        # AFTER the cache read, never before: the cache key has no user in
+        # it, so personalising anything that gets stored would serve one
+        # member's price to everyone.
+        return await _personalise_prices(cached_result, user_id)
 
     slug_map = {k: v for k, v in PBP_SLUG_MAP.items() if not ids_filter or k in ids_filter}
 
@@ -701,7 +789,9 @@ async def pbp_availability(
     }
 
     _cache_set(cache_key, response)
-    return response
+    # Personalise only the copy being returned. The object handed to
+    # _cache_set above stays public.
+    return await _personalise_prices(response, user_id)
 
 
 @app.get("/api/pbp/venue/{facility_id}")
