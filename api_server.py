@@ -677,6 +677,7 @@ async def _personalise_prices(response, user_id):
                 headers={"X-Internal-Key": SUPABASE_SERVICE_KEY or ""},
             )
         if r.status_code != 200:
+            print(f"personalised pricing HTTP {r.status_code}: {r.text[:200]}", flush=True)
             return response
         resolved = (r.json() or {}).get("resolved") or {}
     except Exception as e:
@@ -1364,6 +1365,11 @@ async def _personalise_live_sessions(sessions, user_id):
                 headers={"X-Internal-Key": SUPABASE_SERVICE_KEY or ""},
             )
         if r.status_code != 200:
+            # Logged, not silent: a non-2xx here previously produced exactly
+            # the same observable result as "this member has no discount",
+            # which made a broken call indistinguishable from correct
+            # behaviour.
+            print(f"live_sessions personalisation HTTP {r.status_code}: {r.text[:200]}", flush=True)
             return sessions
         resolved = (r.json() or {}).get("resolved") or {}
     except Exception as e:
