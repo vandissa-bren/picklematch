@@ -68,7 +68,7 @@ async def main():
                                 for s in targets if s.get("lesson_id")]}
         try:
             rb = await c.post(f"{BOOKING}/api/resolve-prices", json=payload,
-                              headers={"X-Internal-Key": SUPABASE_SERVICE_KEY})
+                              headers={"X-Internal-Key": SUPABASE_KEY})
             print(f"  HTTP {rb.status_code}: {rb.text[:300]}")
         except Exception as e:
             print(f"  FAILED: {e}")
