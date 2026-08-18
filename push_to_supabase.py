@@ -169,9 +169,17 @@ async def supabase_upsert(records: list[dict]) -> None:
                 params={"id": f"in.({','.join(row_ids)})", "select": "id,data"},
                 headers=headers,
             )
-            if fetch_resp.status_code == 200:
-                for row in fetch_resp.json():
-                    existing_by_id[row["id"]] = row["data"]
+            if fetch_resp.status_code != 200:
+                # Not cosmetic: existing_by_id feeds the merge below, which
+                # preserves court_prices, shift_map and previously-fetched
+                # by_date blocks. Continuing with an empty dict would skip
+                # that merge and overwrite live court data with nothing.
+                raise RuntimeError(
+                    f"Supabase read failed ({fetch_resp.status_code}): "
+                    f"{fetch_resp.text[:200]}"
+                )
+            for row in fetch_resp.json():
+                existing_by_id[row["id"]] = row["data"]
 
         # Merge court_prices, shift_map, by_date into record["data"]
         for record in records:
@@ -197,7 +205,14 @@ async def supabase_upsert(records: list[dict]) -> None:
             headers=headers,
         )
         if resp.status_code not in (200, 201):
-            console.print(f"  [red]Supabase error {resp.status_code}: {resp.text[:200]}[/red]")
+            # Must raise, not just print. This previously returned normally,
+            # so the caller's "Pushed N venues" message printed regardless
+            # and the workflow exited 0. An RLS rejection therefore went
+            # unnoticed for four days while every scheduled scrape discarded
+            # its results and reported success.
+            raise RuntimeError(
+                f"Supabase write failed ({resp.status_code}): {resp.text[:300]}"
+            )
 
 async def scrape_pbp_venue(
     cookies: dict,
@@ -422,6 +437,8 @@ async def run_once():
             })
             console.print(f"  [green]✓[/green] {r['name']} · {sum(len(v) for v in r['by_date'].values())} blocks · {len(r['sessions'])} sessions")
 
+        # Any failure propagates: a scrape that cannot persist is a failed
+        # run, and the workflow must go red rather than green.
         await supabase_upsert(records)
         console.print(f"[green]✓ Pushed {len(records)} PBP venues to Supabase[/green]\n")
 
