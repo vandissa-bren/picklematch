@@ -1302,12 +1302,95 @@ async def pbp_connect(req: ConnectRequest):
         raise HTTPException(status_code=500, detail=f"Connection failed: {e}")
 
 # ── Live session fetch for extended dates ─────────────────────────────────────
+def _extract_tiers(records):
+    """
+    Shape PBP pricing records for the resolver.
+
+    Field selection only -- no pricing decision is made here. Which tier
+    applies to a user is decided solely by the resolver in booking_server,
+    and this endpoint deliberately holds no part of that rule.
+
+    Mirrors the scraper's shaping in push_to_supabase.py. The two live in
+    separate repositories on separate hosts and cannot share code; keeping
+    them consistent is a small, visible cost, and far preferable to a second
+    copy of the matching logic.
+    """
+    out = []
+    for r in (records or []):
+        if not isinstance(r, dict) or r.get("hidden"):
+            continue
+        raw = r.get("price")
+        if raw is None or isinstance(raw, bool):
+            continue
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            continue
+        tier = {"price": value, "player_category": r.get("player_category")}
+        for key in ("allowed_affiliations", "time_unit",
+                    "time_range_start", "time_range_end"):
+            if r.get(key) is not None:
+                tier[key] = r.get(key)
+        out.append(tier)
+    return out
+
+
+async def _personalise_live_sessions(sessions, user_id):
+    """
+    Overlay `resolved_price` on live-scraped sessions.
+
+    Sends the tiers inline: these sessions were scraped just now and need
+    not be in availability_cache, so the resolver could not look them up.
+
+    Same batch endpoint and same frozen resolver as cached discovery, so
+    both paths price identically. An enhancement, never a dependency --
+    any failure returns the sessions untouched, because "search my member
+    venues" must keep working even when personalisation cannot.
+    """
+    if not user_id or not sessions:
+        return sessions
+
+    payload = [{"lesson_id": s["lesson_id"], "facility_id": s["facility_id"],
+                "price": s.get("price"), "price_tiers": s.get("price_tiers") or []}
+               for s in sessions if s.get("lesson_id") and s.get("facility_id")]
+    if not payload:
+        return sessions
+
+    try:
+        async with httpx.AsyncClient(timeout=6.0) as client:
+            r = await client.post(
+                f"{BOOKING_SERVER_URL}/api/resolve-prices",
+                json={"user_id": user_id, "sessions": payload},
+                headers={"X-Internal-Key": SUPABASE_SERVICE_KEY or ""},
+            )
+        if r.status_code != 200:
+            return sessions
+        resolved = (r.json() or {}).get("resolved") or {}
+    except Exception as e:
+        print(f"live_sessions personalisation unavailable: {e}", flush=True)
+        return sessions
+
+    for s in sessions:
+        hit = resolved.get(str(s.get("lesson_id")))
+        if hit:
+            s["resolved_price"] = hit
+    return sessions
+
+
 @app.get("/api/live_sessions")
 async def live_sessions(
     facility_ids: str = Query(...),  # comma-separated facility IDs
     date: str = Query(...),          # YYYY-MM-DD
+    user_id: Optional[str] = Query(None, description="PickleMatch user, for personalised pricing"),
 ):
-    """Scrape sessions live from PBP for specific venues on a specific date."""
+    """
+    Scrape sessions live from PBP for specific venues on a specific date.
+
+    This backs the "search my member venues" feature, so it is precisely
+    where a member is most likely to be looking -- and it filtered member
+    pricing out entirely. With `user_id`, sessions priced differently for
+    that member gain `resolved_price`; `price` stays the public figure.
+    """
     import re
     from extract_thejar import _extract_react_props_from_html
 
@@ -1366,6 +1449,11 @@ async def live_sessions(
                                 p = float(pl["price"])
                                 price = f"${p:.0f}" if p == int(p) else f"${p:.2f}"
                                 break
+                        # The loop above skips every member record, which is
+                        # why this endpoint could never show a member price.
+                        # Keep them; `price` stays the public figure.
+                        program_tiers = _extract_tiers(
+                            (props.get("prices") or []) + (props.get("packages") or []))
                         for lesson in lessons_raw:
                             ld = lesson.get("lesson_date")
                             if ld != date_str:
@@ -1383,6 +1471,10 @@ async def live_sessions(
                                     p = float(ip["price"])
                                     lp = f"${p:.0f}" if p == int(p) else f"${p:.2f}"
                                     break
+                            # Per-lesson tiers where the clinic prices per
+                            # session; otherwise the programme-level ones.
+                            lesson_tiers = _extract_tiers(
+                                lesson.get("individual_prices")) or program_tiers
                             all_sessions.append({
                                 "facility_id": fid,
                                 "title": stub.get("name", "Session"),
@@ -1399,6 +1491,7 @@ async def live_sessions(
                                 "lesson_id": lid,
                                 "clinic_id": clinic_id,
                                 "program_slug": program_slug,
+                                "price_tiers": lesson_tiers,
                             })
                     except Exception:
                         continue
@@ -1406,6 +1499,7 @@ async def live_sessions(
             print(f"live_sessions error for {fid}: {e}", flush=True)
             continue
 
+    all_sessions = await _personalise_live_sessions(all_sessions, user_id)
     return {"sessions": all_sessions, "date": date_str, "fetched_at": datetime.utcnow().isoformat()}
 
 # ── Announcements ─────────────────────────────────────────────────────────────
