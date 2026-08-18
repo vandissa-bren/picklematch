@@ -1387,7 +1387,12 @@ async def _personalise_live_sessions(sessions, user_id):
 async def live_sessions(
     facility_ids: str = Query(...),  # comma-separated facility IDs
     date: str = Query(...),          # YYYY-MM-DD
-    user_id: Optional[str] = Query(None, description="PickleMatch user, for personalised pricing"),
+    # NOT `user_id`: this function already binds that name to the PBP
+    # scraper id from the cookie file a few lines below, which silently
+    # overwrote the parameter and sent PBP's numeric id to the pricing
+    # service instead of the caller's UUID.
+    pm_user_id: Optional[str] = Query(None, alias="user_id",
+                                      description="PickleMatch user, for personalised pricing"),
 ):
     """
     Scrape sessions live from PBP for specific venues on a specific date.
@@ -1505,7 +1510,7 @@ async def live_sessions(
             print(f"live_sessions error for {fid}: {e}", flush=True)
             continue
 
-    all_sessions = await _personalise_live_sessions(all_sessions, user_id)
+    all_sessions = await _personalise_live_sessions(all_sessions, pm_user_id)
     return {"sessions": all_sessions, "date": date_str, "fetched_at": datetime.utcnow().isoformat()}
 
 # ── Announcements ─────────────────────────────────────────────────────────────
