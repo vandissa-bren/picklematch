@@ -127,8 +127,14 @@ for _name in ("pbp_availability", "live_sessions"):
     _s = ast.get_source_segment(_src, _f)
     check(f"{_name}: parameter is pm_user_id", "pm_user_id" in _s, True)
     check(f"{_name}: public query name preserved", 'alias="user_id"' in _s, True)
-    check(f"{_name}: no bare `user_id` param declaration",
-          "user_id: Optional[str] = Query" in _s, False)
+    # Substring matching would be wrong here: "user_id: Optional[str] =
+    # Query" is contained in "pm_user_id: Optional[str] = Query", so the
+    # correct code matches the pattern meant to detect the bug. Check the
+    # parsed argument names instead.
+    _args = [a.arg for a in _f.args.args + _f.args.kwonlyargs]
+    check(f"{_name}: no argument literally named user_id",
+          "user_id" in _args, False)
+    check(f"{_name}: pm_user_id is an argument", "pm_user_id" in _args, True)
     # Every call into personalisation must pass the parameter, never the
     # local PBP id.
     _calls = _re.findall(r"_personalise\w*\([^)]*\)", _s)
