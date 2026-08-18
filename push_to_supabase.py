@@ -116,6 +116,40 @@ def _load_cookies() -> tuple[dict, int]:
     return {}, 0
 
 
+def _pricing_tiers(records):
+    """
+    Keep the pricing records PBP publishes, including member tiers.
+
+    Deliberately NOT flattened to price_member/price_non_member. Membership
+    is not binary: The Rally publishes $20 for "V2 - Rally Member" and
+    $12.50 for "VIP Rally", PicklePlex $20 for Essentials and $18.75 for
+    Community+, both sets sharing player_category "member" and separable
+    only by allowed_affiliations. A two-field model would silently collapse
+    those into one number and show members the wrong tier.
+
+    Only non-hidden records with a usable numeric price are kept. Zero is
+    valid; None is not.
+    """
+    out = []
+    for r in (records or []):
+        if not isinstance(r, dict) or r.get("hidden"):
+            continue
+        raw = r.get("price")
+        if raw is None or isinstance(raw, bool):
+            continue
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            continue
+        tier = {"price": value, "player_category": r.get("player_category")}
+        for key in ("allowed_affiliations", "time_unit",
+                    "time_range_start", "time_range_end"):
+            if r.get(key) is not None:
+                tier[key] = r.get(key)
+        out.append(tier)
+    return out
+
+
 async def supabase_upsert(records: list[dict]) -> None:
     if not records:
         return
@@ -180,6 +214,11 @@ async def scrape_pbp_venue(
         "platform": "playbypoint",
         "by_date": {d.isoformat(): [] for d in dates},
         "sessions": [],
+        # Program-level pricing (prices/packages), keyed by program_slug.
+        # Kept OUT of the session objects deliberately: a package price is
+        # the cost of the package, not of one occurrence, so copying it onto
+        # each session would misrepresent it as a per-session price.
+        "program_pricing": {},
     }
 
     date_strs = {d.isoformat() for d in dates}
@@ -248,12 +287,29 @@ async def scrape_pbp_venue(
                             sl = f"{mn} / {mx}"
                         elif mn:
                             sl = f"{mn}+"
+                    # `price` stays exactly as before: the public, non-member
+                    # figure. It is what the whole app already renders, and
+                    # nothing downstream should have to change.
                     price = ""
                     for pl in (props.get("prices") or props.get("packages") or []):
                         if not pl.get("hidden") and pl.get("price") and pl.get("player_category") != "member":
                             p = float(pl["price"])
                             price = f"${p:.0f}" if p == int(p) else f"${p:.2f}"
                             break
+
+                    # Preserve every non-hidden tier alongside it. The member
+                    # records were previously discarded by the filter above,
+                    # which is why a member could never be shown their price.
+                    #
+                    # Stored as the records PBP publishes rather than flattened
+                    # into price_member/price_non_member: membership is not
+                    # binary. PicklePlex prices Essentials at $20 and
+                    # Community+ at $18.75, both player_category "member",
+                    # separable only by allowed_affiliations.
+                    program_tiers = _pricing_tiers(
+                        (props.get("prices") or []) + (props.get("packages") or []))
+                    if program_tiers:
+                        result["program_pricing"][program_slug] = program_tiers
 
                     for lesson in lessons_raw:
                         ld = lesson.get("lesson_date")
@@ -273,6 +329,11 @@ async def scrape_pbp_venue(
                                 p = float(ip["price"])
                                 lp = f"${p:.0f}" if p == int(p) else f"${p:.2f}"
                                 break
+
+                        # Per-lesson tiers, including the member records the
+                        # loop above skips. These ARE per-occurrence prices,
+                        # so unlike package pricing they belong on the session.
+                        lesson_tiers = _pricing_tiers(lesson.get("individual_prices"))
 
                         # Roster
                         roster = []
@@ -311,6 +372,10 @@ async def scrape_pbp_venue(
                             "roster": roster,
                             "lesson_id": lid,
                             "program_slug": program_slug,
+                            # Empty when the venue publishes no tiers, so the
+                            # field is always present and callers need no
+                            # special-casing. `price` above is unchanged.
+                            "price_tiers": lesson_tiers,
                         })
                 except Exception as e:
                     console.print(f"    [yellow]clinic {clinic_id} error for {name}: {e}[/yellow]")
