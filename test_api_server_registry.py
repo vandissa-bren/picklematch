@@ -54,6 +54,13 @@ u = reg.resolve(99999)
 check("unknown facility -> Unresolved (caller skips, no default slug)",
       isinstance(u, reg.Unresolved))
 
+print("\n-- delisted venues resolve for DISPLAY but never for FETCHING --")
+src_helpers = re.search(r"def registry_slug.*?\n\n\n", src, re.S).group(0)
+check("registry_slug gates on status == 'active'",
+      'status == "active"' in src_helpers)
+check("registry_name does NOT gate on status (historical rows need a name)",
+      'status == "active"' not in re.search(r"def registry_name.*?\n\n\n", src, re.S).group(0))
+
 print("\n-- names are real names, not 'Venue {id}' placeholders --")
 check("1883 has a real name",
       reg.resolve(1883).name == "The Jar HQ | Maidstone", reg.resolve(1883).name)
