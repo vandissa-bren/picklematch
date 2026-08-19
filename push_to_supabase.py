@@ -142,7 +142,17 @@ def _pricing_tiers(records):
         except (TypeError, ValueError):
             continue
         tier = {"price": value, "player_category": r.get("player_category")}
-        for key in ("allowed_affiliations", "time_unit",
+        # lesson_unit states what the price buys. PBP writes "session" for a
+        # single occurrence and something else for a commitment -- Dink &
+        # Drive's league is "per_week_per_next_sessions" at $125/$100, which
+        # is entry to the whole league rather than the cost of one Tuesday.
+        # Only records PBP labels as a session may become a session price.
+        #
+        # Note lessons==1 does NOT distinguish them: that league is lessons=1
+        # too. Across 230 sampled records, 227 said session, 3 were that
+        # league, and none were unlabelled.
+        for key in ("allowed_affiliations", "lessons", "lesson_unit",
+                    "lesson_details", "time_unit",
                     "time_range_start", "time_range_end"):
             if r.get(key) is not None:
                 tier[key] = r.get(key)
