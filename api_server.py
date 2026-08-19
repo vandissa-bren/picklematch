@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import httpx
+import venue_registry
 import json
 import logging
 import os
@@ -221,8 +222,50 @@ VENUE_SURFACES: dict[int, list[str]] = {
     885: ["pickleball"],
     1557: ["standard_courts", "championship_courts"],
     1379: ["main_courts"],
-    1783: "Pickle4Real",
+    # 1783 removed: it held the bare string "Pickle4Real" where a list of
+    # surfaces was required. The consumer below iterates this value, so
+    # Pickle4Real requested thirteen single-character surfaces -- "P", "i",
+    # "c", "k"... -- each answered by PBP with an empty 200 that is
+    # indistinguishable from "fully booked". Not replaced with the correct
+    # surfaces: patching this map venue-by-venue is the defect class Phase 2
+    # removes. With no entry it falls through to discovery like the other 17
+    # venues, which is strictly better than iterating a venue name.
 }
+
+# ── Venue identity ──────────────────────────────────────────────────────────
+#
+# PBP_SLUG_MAP / VENUE_NAMES above are superseded by venue_registry and have
+# no remaining consumers. They are kept only until the scrapers and frontend
+# have migrated too, then deleted. Do not add to them.
+
+def registry_slug(facility_id) -> str | None:
+    """
+    Slug for a discovery/read path. Returns None for a facility the registry
+    does not know, so callers skip it -- never a default that would address
+    another venue.
+    """
+    v = venue_registry.resolve(facility_id)
+    return v.slug if isinstance(v, venue_registry.Venue) else None
+
+
+def registry_name(facility_id) -> str:
+    v = venue_registry.resolve(facility_id)
+    return v.name if isinstance(v, venue_registry.Venue) else f"Venue {facility_id}"
+
+
+def active_slug_map() -> dict[int, str]:
+    """{facility_id: slug} for every active venue -- replaces iterating
+    PBP_SLUG_MAP, which was missing SportsWell and Pickleball Paradise."""
+    return {v.facility_id: v.slug for v in venue_registry.active_venues()}
+
+
+def bookable_slug(facility_id) -> str:
+    """Slug for a booking path. Fails closed."""
+    try:
+        return venue_registry.get_bookable_venue(facility_id).slug
+    except venue_registry.RegistryError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -254,7 +297,7 @@ async def _get_pbp_venues() -> list[dict]:
                 if not fid or fid in seen:
                     continue
                 seen.add(fid)
-                slug = PBP_SLUG_MAP.get(fid, "")
+                slug = registry_slug(fid) or ""
                 if not slug:
                     # Try to resolve from API
                     try:
@@ -502,8 +545,8 @@ async def _warm_single_date(target):
     try:
         from_sec, to_sec = _hhmm_to_sec("00:00"), _hhmm_to_sec("23:30")
         results = await asyncio.gather(*[
-            _get_pbp_availability(fid, VENUE_NAMES.get(fid, f"Venue {fid}"), slug, target, from_sec, to_sec)
-            for fid, slug in PBP_SLUG_MAP.items()
+            _get_pbp_availability(fid, registry_name(fid), slug, target, from_sec, to_sec)
+            for fid, slug in active_slug_map().items()
         ], return_exceptions=True)
         court_blocks_by_id = {r["id"]: r.get("court_blocks", []) for r in results if isinstance(r, dict)}
         supabase_data = await _read_from_supabase("playbypoint")
@@ -626,8 +669,8 @@ async def pbp_venues():
     # Fallback to slug map if cache empty
     if not venues:
         venues = [
-            {"id": fid, "name": f"Venue {fid}", "slug": slug, "platform": "playbypoint"}
-            for fid, slug in PBP_SLUG_MAP.items()
+            {"id": fid, "name": registry_name(fid), "slug": slug, "platform": "playbypoint"}
+            for fid, slug in active_slug_map().items()
         ]
     return {"venues": venues, "count": len(venues)}
 
@@ -752,7 +795,7 @@ async def pbp_availability(
         # member's price to everyone.
         return await _personalise_prices(cached_result, pm_user_id)
 
-    slug_map = {k: v for k, v in PBP_SLUG_MAP.items() if not ids_filter or k in ids_filter}
+    slug_map = {k: v for k, v in active_slug_map().items() if not ids_filter or k in ids_filter}
 
     cookies, user_id, _ = _load_session_with_env_fallback()
 
@@ -841,8 +884,8 @@ async def pbp_single_venue(
 
     return {
         "id": facility_id,
-        "name": f"Venue {facility_id}",
-        "slug": PBP_SLUG_MAP.get(facility_id, ""),
+        "name": registry_name(facility_id),
+        "slug": registry_slug(facility_id) or "",
         "platform": "playbypoint",
         "court_blocks": [],
         "sessions": [],
@@ -986,7 +1029,7 @@ async def pbp_book_court(req: CourtBookingRequest):
         raise HTTPException(status_code=401, detail="PBP session not yet active. Please run the sync script or wait a few minutes.")
 
     try:
-        slug = PBP_SLUG_MAP.get(req.facility_id, "")
+        slug = bookable_slug(req.facility_id)
         target_date = datetime.strptime(req.date, "%Y-%m-%d").date()
         start_sec = _hhmm_to_sec(req.start_time)
         end_sec = _hhmm_to_sec(req.end_time)
@@ -1083,7 +1126,12 @@ async def pbp_book(req: BookingRequest):
 
     # Use the stored cookies to make the booking.
     try:
-        slug = req.program_slug or PBP_SLUG_MAP.get(req.clinic_id, "")
+        # Was: req.program_slug or PBP_SLUG_MAP.get(req.clinic_id, "")
+        # -- a CLINIC id looked up in a FACILITY map. Clinic ids are
+        # six-figure (226121, 179528); facility ids are 597-1883, so that
+        # lookup could never match and always yielded "". Behaviour is
+        # unchanged; the type confusion is not carried into the registry.
+        slug = req.program_slug or ""
         async with PlayByPointAPI(cookies=cookies, club_slug=slug, proxy=PROXY_URL) as api:
             api._user_id = pbp_user_id
 
@@ -1433,7 +1481,7 @@ async def live_sessions(
     all_sessions = []
 
     for fid in fids:
-        slug = PBP_SLUG_MAP.get(fid)
+        slug = registry_slug(fid)
         if not slug:
             continue
         try:
@@ -1554,7 +1602,7 @@ async def live_courts(
     from datetime import date as date_type
     import asyncio
     target_date = datetime.strptime(date, "%Y-%m-%d").date()
-    slug = PBP_SLUG_MAP.get(facility_id)
+    slug = registry_slug(facility_id)
     if not slug:
         return {"court_blocks": [], "date": date, "error": "Unknown facility"}
 
