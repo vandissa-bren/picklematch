@@ -1,0 +1,204 @@
+{
+  "generated_from": "supabase venue_registry",
+  "schema_version": 1,
+  "venues": [
+    {
+      "booking_enabled": true,
+      "facility_id": 597,
+      "fetcher": "court_blocks",
+      "name": "The Jar | South Melbourne",
+      "platform": "playbypoint",
+      "slug": "nplpickleball",
+      "status": "active"
+    },
+    {
+      "booking_enabled": true,
+      "facility_id": 755,
+      "fetcher": "court_blocks",
+      "name": "Level Up Pickleball Knox City",
+      "platform": "playbypoint",
+      "slug": "leveluppickleballknoxcity",
+      "status": "active"
+    },
+    {
+      "booking_enabled": true,
+      "facility_id": 885,
+      "fetcher": "sportswell",
+      "name": "SportsWell | Pickleball Palace",
+      "platform": "playbypoint",
+      "slug": "sportswellpickleballpalace",
+      "status": "active"
+    },
+    {
+      "booking_enabled": true,
+      "facility_id": 1009,
+      "fetcher": "court_blocks",
+      "name": "Eastern Indoor Pickleball Club",
+      "platform": "playbypoint",
+      "slug": "easternindoorpickleballclub",
+      "status": "active"
+    },
+    {
+      "booking_enabled": true,
+      "facility_id": 1119,
+      "fetcher": "court_blocks",
+      "name": "Swing & Serve",
+      "platform": "playbypoint",
+      "slug": "swingandserve",
+      "status": "active"
+    },
+    {
+      "booking_enabled": true,
+      "facility_id": 1355,
+      "fetcher": "court_blocks",
+      "name": "State Pickleball Centre",
+      "platform": "playbypoint",
+      "slug": "statepickleballcentre",
+      "status": "active"
+    },
+    {
+      "booking_enabled": true,
+      "facility_id": 1379,
+      "fetcher": "court_blocks",
+      "name": "Pickleholic",
+      "platform": "playbypoint",
+      "slug": "pickleholic",
+      "status": "active"
+    },
+    {
+      "booking_enabled": true,
+      "facility_id": 1383,
+      "fetcher": "court_blocks",
+      "name": "Melbourne Pickle Club",
+      "platform": "playbypoint",
+      "slug": "MelbournePickleClub",
+      "status": "active"
+    },
+    {
+      "booking_enabled": true,
+      "facility_id": 1461,
+      "fetcher": "court_blocks",
+      "name": "The Real Dill | Ravenhall",
+      "platform": "playbypoint",
+      "slug": "therealdill",
+      "status": "active"
+    },
+    {
+      "booking_enabled": true,
+      "facility_id": 1485,
+      "fetcher": "court_blocks",
+      "name": "Pickle Haus",
+      "platform": "playbypoint",
+      "slug": "picklehaus",
+      "status": "active"
+    },
+    {
+      "booking_enabled": true,
+      "facility_id": 1487,
+      "fetcher": "court_blocks",
+      "name": "Pickle Playground",
+      "platform": "playbypoint",
+      "slug": "Pickle-Playground",
+      "status": "active"
+    },
+    {
+      "booking_enabled": true,
+      "facility_id": 1532,
+      "fetcher": "court_blocks",
+      "name": "Pickleplex",
+      "platform": "playbypoint",
+      "slug": "pickleplex",
+      "status": "active"
+    },
+    {
+      "booking_enabled": true,
+      "facility_id": 1557,
+      "fetcher": "court_blocks",
+      "name": "Dink & Drive Pickleball Club",
+      "platform": "playbypoint",
+      "slug": "dinkndrivepickleballclub",
+      "status": "active"
+    },
+    {
+      "booking_enabled": true,
+      "facility_id": 1584,
+      "fetcher": "court_blocks",
+      "name": "The Room Pickleball",
+      "platform": "playbypoint",
+      "slug": "theroompickleball",
+      "status": "active"
+    },
+    {
+      "booking_enabled": true,
+      "facility_id": 1664,
+      "fetcher": "court_blocks",
+      "name": "The Rally Pickleball",
+      "platform": "playbypoint",
+      "slug": "TheRallyPickleball",
+      "status": "active"
+    },
+    {
+      "booking_enabled": true,
+      "facility_id": 1696,
+      "fetcher": "court_blocks",
+      "name": "Picklezone",
+      "platform": "playbypoint",
+      "slug": "picklezone",
+      "status": "active"
+    },
+    {
+      "booking_enabled": true,
+      "facility_id": 1714,
+      "fetcher": "court_blocks",
+      "name": "Runway Pickleball",
+      "platform": "playbypoint",
+      "slug": "RunwayPickleball",
+      "status": "active"
+    },
+    {
+      "booking_enabled": true,
+      "facility_id": 1733,
+      "fetcher": "court_blocks",
+      "name": "Pickleball Powerhouse",
+      "platform": "playbypoint",
+      "slug": "pickleballpowerhouse",
+      "status": "active"
+    },
+    {
+      "booking_enabled": true,
+      "facility_id": 1770,
+      "fetcher": "sportswell",
+      "name": "Raya Pickleball Club",
+      "platform": "playbypoint",
+      "slug": "rayapickleballclub",
+      "status": "active"
+    },
+    {
+      "booking_enabled": true,
+      "facility_id": 1783,
+      "fetcher": "sportswell",
+      "name": "Pickle4Real",
+      "platform": "playbypoint",
+      "slug": "PICKLE4REAL",
+      "status": "active"
+    },
+    {
+      "booking_enabled": false,
+      "facility_id": 1826,
+      "fetcher": null,
+      "name": "Pickleball Paradise",
+      "platform": "playbypoint",
+      "slug": "pickleballparadise",
+      "status": "delisted"
+    },
+    {
+      "booking_enabled": true,
+      "facility_id": 1883,
+      "fetcher": "court_blocks",
+      "name": "The Jar HQ | Maidstone",
+      "platform": "playbypoint",
+      "slug": "TheJarHQ",
+      "status": "active"
+    }
+  ]
+}
