@@ -1334,7 +1334,12 @@ def _extract_tiers(records):
         except (TypeError, ValueError):
             continue
         tier = {"price": value, "player_category": r.get("player_category")}
-        for key in ("allowed_affiliations", "time_unit",
+        # lesson_unit must be carried: the resolver uses it to decide whether
+        # a programme-level price may be shown as a session price, and
+        # excludes anything unlabelled. Omitting it here meant live-scraped
+        # programme pricing was silently ineligible.
+        for key in ("allowed_affiliations", "lessons", "lesson_unit",
+                    "lesson_details", "time_unit",
                     "time_range_start", "time_range_end"):
             if r.get(key) is not None:
                 tier[key] = r.get(key)
