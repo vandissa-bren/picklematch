@@ -141,6 +141,24 @@ for _name in ("pbp_availability", "live_sessions"):
     check(f"{_name}: all personalisation calls use pm_user_id",
           all("pm_user_id" in c for c in _calls) and len(_calls) > 0, True)
 
+print("\n--- the two tier-shaping copies must stay in sync ---")
+# push_to_supabase.py and api_server.py each shape PBP records for the
+# resolver. They live in one repo but are separate functions, and
+# lesson_unit was added to one and not the other -- so live-scraped
+# programme pricing was silently ineligible while cached pricing worked.
+import re as _re2, os as _os2
+_scraper = open(_os2.path.join(_os2.path.dirname(_os2.path.abspath(__file__)),
+                               "push_to_supabase.py")).read()
+def _keys(text, fn):
+    seg = text[text.index("def " + fn):]
+    m = _re2.search(r"for key in \(([^)]*)\)", seg)
+    return {k.strip().strip('"') for k in m.group(1).split(",") if k.strip()}
+_a = _keys(_scraper, "_pricing_tiers")
+_b = _keys(_src, "_extract_tiers")
+check("both shapers preserve the same fields", _a, _b)
+check("lesson_unit preserved by the scraper", "lesson_unit" in _a, True)
+check("lesson_unit preserved by the api server", "lesson_unit" in _b, True)
+
 print()
 if fails:
     print(f"{len(fails)} FAILURES:")
