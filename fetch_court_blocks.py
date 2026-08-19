@@ -6,7 +6,7 @@ Prices are fetched once per court/shift and cached in Supabase — not re-fetche
 import asyncio
 import json
 import os
-from datetime import date, timedelta, datetime
+from datetime import date, timedelta, datetime, timezone
 from zoneinfo import ZoneInfo
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
@@ -65,6 +65,16 @@ VENUE_NAMES = {
 }
 
 # Venues that use non-pickleball surface names for court hire
+# PBP_SLUG_MAP and VENUE_NAMES above are superseded by venue_registry and
+# have no remaining consumers here. Kept until the frontend migrates too,
+# then deleted. Do not add to them.
+
+def _venue_name(facility_id) -> str:
+    import venue_registry
+    v = venue_registry.resolve(facility_id)
+    return v.name if isinstance(v, venue_registry.Venue) else str(facility_id)
+
+
 VENUE_SURFACES = {
     885: ["pickleball"],
     1557: ["standard_courts", "championship_courts"],
@@ -309,6 +319,7 @@ async def fetch_court_blocks_for_venue(api, facility_id: int, target_date: date,
 
 async def main():
     from extract_thejar import PlayByPointAPI
+    import venue_registry
     import httpx
 
     cookie_data = json.loads(PBP_COOKIES_JSON)
@@ -318,7 +329,9 @@ async def main():
     today = datetime.now(ZoneInfo('Australia/Melbourne')).date()
     dates = [today + timedelta(days=i) for i in range(DAYS_START, DAYS_AHEAD)]
 
-    print(f"Fetching court blocks for {len(dates)} dates x {len(PBP_SLUG_MAP)} venues...")
+    targets = venue_registry.venues_for_fetcher("court_blocks")
+    print(f"Fetching court blocks for {len(dates)} dates x {len(targets)} venues "
+          f"(registry fetcher=court_blocks)...")
 
     headers = {
         "apikey": SUPABASE_KEY,
@@ -342,14 +355,27 @@ async def main():
 
     results_by_venue = {}
 
-    for fid, slug in PBP_SLUG_MAP.items():
-        name = VENUE_NAMES.get(fid, str(fid))
+    # Venue selection comes from the registry, which is also what decides
+    # this scraper is responsible for them. SportsWell, Raya and Pickle4Real
+    # carry fetcher='sportswell' and are handled by fetch_sportswell.py, so
+    # they are correctly absent here rather than accidentally missing.
+    for venue in venue_registry.venues_for_fetcher("court_blocks"):
+        fid, slug, name = venue.facility_id, venue.slug, venue.name
         results_by_venue[fid] = {"by_date": {}, "court_prices": {}, "court_prices_fetched_at": {}}
 
         existing_record = records_by_fid.get(fid, {})
         existing_data = existing_record.get("data", {})
         existing_prices = existing_data.get("court_prices", {})
         existing_fetched_at = existing_data.get("court_prices_fetched_at", {})
+
+        # Start from what is already cached. On failure this venue is left
+        # untouched rather than written with empty results -- see the
+        # `ok` flag below.
+        results_by_venue[fid]["court_prices"] = existing_prices.copy()
+        results_by_venue[fid]["court_prices_fetched_at"] = existing_fetched_at.copy()
+        results_by_venue[fid]["ok"] = False
+        results_by_venue[fid]["error"] = None
+        results_by_venue[fid]["dates_ok"] = 0
 
         try:
             async with PlayByPointAPI(cookies=cookies, club_slug=slug) as api:
@@ -364,10 +390,13 @@ async def main():
                     results_by_venue[fid]["by_date"][date_str] = blocks
                     results_by_venue[fid]["court_prices"] = updated_prices
                     results_by_venue[fid]["court_prices_fetched_at"] = updated_fetched_at
+                    results_by_venue[fid]["dates_ok"] += 1
                     print(f"  {name} {date_str}: {len(blocks)} blocks")
                     await asyncio.sleep(1)
+                results_by_venue[fid]["ok"] = True
         except Exception as e:
-            print(f"  {name} failed: {e}")
+            results_by_venue[fid]["error"] = str(e)
+            print(f"  {name} FAILED: {e}")
         await asyncio.sleep(2)
 
     # Push to Supabase
@@ -378,24 +407,79 @@ async def main():
             fid = data.get("id")
             if fid not in results_by_venue:
                 return
+            result = results_by_venue[fid]
+
+            # A failed fetch must not overwrite good data. Previously
+            # court_prices was written unconditionally from a dict that
+            # stayed empty when the venue raised, so one transient failure
+            # wiped that venue's cached prices entirely.
+            if not result["ok"]:
+                data["fetch_status"] = {
+                    "state": "failed",
+                    "at": datetime.now(timezone.utc).isoformat(),
+                    "error": result["error"],
+                    "dates_ok": result["dates_ok"],
+                }
+                await client.patch(
+                    f"{SUPABASE_URL}/rest/v1/availability_cache",
+                    params={"id": f"eq.{row_id}"},
+                    headers=headers,
+                    json={"data": data},
+                )
+                print(f"  NOT SAVED {data.get('name', row_id)}: fetch failed, "
+                      f"existing cache left intact")
+                return
+
             by_date = data.get("by_date", {})
-            for date_str, blocks in results_by_venue[fid]["by_date"].items():
+            for date_str, blocks in result["by_date"].items():
                 by_date[date_str] = blocks
             data["by_date"] = by_date
-            data["court_prices"] = results_by_venue[fid]["court_prices"]
-            data["court_prices_fetched_at"] = results_by_venue[fid]["court_prices_fetched_at"]
+            data["court_prices"] = result["court_prices"]
+            data["court_prices_fetched_at"] = result["court_prices_fetched_at"]
+
+            total = sum(len(v) for v in by_date.values())
+            # "Fetched successfully and found nothing" and "could not fetch"
+            # are different facts. A timestamp alone cannot tell them apart,
+            # which is why SportsWell reading blocks=0 / error=None was
+            # operationally ambiguous.
+            data["fetch_status"] = {
+                "state": "ok" if total else "ok_empty",
+                "at": datetime.now(timezone.utc).isoformat(),
+                "error": None,
+                "dates_ok": result["dates_ok"],
+                "blocks": total,
+            }
             await client.patch(
                 f"{SUPABASE_URL}/rest/v1/availability_cache",
                 params={"id": f"eq.{row_id}"},
                 headers=headers,
                 json={"data": data},
             )
-            total = sum(len(v) for v in by_date.values())
-            n_prices = len(results_by_venue[fid]["court_prices"])
-            print(f"  Saved {data.get('name', row_id)}: {total} total blocks, {n_prices} prices cached")
+            n_prices = len(result["court_prices"])
+            print(f"  Saved {data.get('name', row_id)}: {total} total blocks, "
+                  f"{n_prices} prices cached"
+                  + ("  [ZERO BLOCKS -- fetch succeeded but found nothing]"
+                     if not total else ""))
 
         await asyncio.gather(*[patch_venue(record) for record in records])
 
+    # Per-cycle summary. Warming was previously silent on success, so a venue
+    # that stopped producing blocks surfaced as a user reporting empty
+    # availability rather than as anything in a log.
+    ok = [f for f, r in results_by_venue.items() if r["ok"] and r["by_date"]]
+    empty = [f for f in ok if not sum(len(v) for v in results_by_venue[f]["by_date"].values())]
+    failed = [f for f, r in results_by_venue.items() if not r["ok"]]
+    print()
+    print("=" * 60)
+    print(f"CYCLE SUMMARY  attempted={len(results_by_venue)}  "
+          f"ok={len(ok) - len(empty)}  ok_but_empty={len(empty)}  failed={len(failed)}")
+    for fid in empty:
+        print(f"  EMPTY  {fid} {_venue_name(fid)} "
+              f"-- fetched cleanly, zero blocks")
+    for fid in failed:
+        print(f"  FAILED {fid} {_venue_name(fid)} "
+              f"-- {results_by_venue[fid]['error']}")
+    print("=" * 60)
     print("Done.")
 
 

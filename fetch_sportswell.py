@@ -5,6 +5,7 @@ can only be reliably fetched from an Australian IP -- this DO server, not
 GitHub Actions runners. Hence a separate script from fetch_court_blocks.py.
 """
 import asyncio, json, os, httpx
+import venue_registry
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
@@ -22,6 +23,8 @@ SUPABASE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
 # fetch_court_blocks.py's PRICE_REFRESH_HOURS behaviour.
 PRICE_REFRESH_HOURS = int(os.environ.get("PRICE_REFRESH_HOURS", "168"))
 
+# Superseded by venue_registry (fetcher='sportswell'). No consumers remain;
+# deleted once the frontend migrates. Do not add to it.
 GEO_RESTRICTED = {885: "sportswellpickleballpalace", 1770: "rayapickleballclub", 1783: "PICKLE4REAL"}
 
 
@@ -169,7 +172,12 @@ async def main():
     headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}", "Content-Type": "application/json"}
 
     async with httpx.AsyncClient() as client:
-        for fid, slug in GEO_RESTRICTED.items():
+        # Venue selection from the registry. These carry fetcher='sportswell'
+        # because they are geo-restricted and need this script's proxy path;
+        # they are deliberately absent from fetch_court_blocks rather than
+        # missing from it.
+        for _v in venue_registry.venues_for_fetcher("sportswell"):
+            fid, slug = _v.facility_id, _v.slug
             # Load existing data
             resp = await client.get(
                 f"{SUPABASE_URL}/rest/v1/availability_cache",
