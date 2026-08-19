@@ -240,15 +240,34 @@ VENUE_SURFACES: dict[int, list[str]] = {
 
 def registry_slug(facility_id) -> str | None:
     """
-    Slug for a discovery/read path. Returns None for a facility the registry
-    does not know, so callers skip it -- never a default that would address
+    Slug for a FETCH path -- availability, court blocks, anything that goes
+    out to PBP on a venue's behalf.
+
+    Returns None for a facility the registry does not know AND for one that
+    is delisted, so callers skip it. Never a default that would address
     another venue.
+
+    Delisted must be excluded here specifically. venue_registry.resolve()
+    resolves delisted venues on purpose, so historical favourites and past
+    bookings still render a real name -- but resolving for DISPLAY and
+    resolving for FETCHING are different questions. Using resolve() for both
+    made /api/pbp/venue/1826 serve Pickleball Paradise with a live slug and
+    fetch its availability, which is exactly what delisting is meant to
+    stop. Use registry_name() when the caller only needs to label a
+    historical reference.
     """
     v = venue_registry.resolve(facility_id)
-    return v.slug if isinstance(v, venue_registry.Venue) else None
+    if isinstance(v, venue_registry.Venue) and v.status == "active":
+        return v.slug
+    return None
 
 
 def registry_name(facility_id) -> str:
+    """
+    Display name for ANY registered facility, including delisted ones, so a
+    historical reference reads 'Pickleball Paradise' rather than a bare id.
+    Naming a venue is not the same as offering it.
+    """
     v = venue_registry.resolve(facility_id)
     return v.name if isinstance(v, venue_registry.Venue) else f"Venue {facility_id}"
 
