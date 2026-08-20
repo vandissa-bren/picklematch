@@ -371,16 +371,28 @@ async def _get_pbp_availability(
         async with PlayByPointAPI(cookies=cookies, club_slug=slug, proxy=PROXY_URL) as api:
             api._user_id = user_id
 
-            # Auto-detect surface.
-            surface = "pickleball"
+            # Reviewed classification, not a name heuristic. Takes the
+            # first court surface where a single one is needed; the old code
+            # took the first surface merely CONTAINING "pickle", which is a
+            # different and wrong test.
+            import court_surfaces
+            surface = None
             try:
-                ct = await api.court_types(facility_id)
-                ps = [s for s in (ct or [])
-                      if "pickle" in (s.get("surface") or "").lower()]
-                if ps:
-                    surface = ps[0]["surface"]
-            except Exception:
-                pass
+                ct = await api.court_types(facility_id, kind=None)
+                res = court_surfaces.resolve_surfaces(facility_id, ct or [])
+                if res.unknown:
+                    logger.warning(res.diagnostic())
+                surface = res.court[0] if res.court else None
+            except Exception as e:
+                logger.warning("facility %s: surface resolution failed (%s)",
+                               facility_id, e)
+            if surface is None:
+                # No "pickleball" default: PBP answers an unknown surface
+                # with an empty 200 that is indistinguishable from a fully
+                # booked venue.
+                logger.warning("facility %s: no court surface, skipping",
+                               facility_id)
+                return []
 
             # Available hours.
             try:
@@ -1056,15 +1068,17 @@ async def pbp_book_court(req: CourtBookingRequest):
         async with PlayByPointAPI(cookies=cookies, club_slug=slug, proxy=PROXY_URL) as api:
             api._user_id = pbp_user_id
 
-            # Get surface type.
-            surface = "pickleball"
-            try:
-                ct = await api.court_types(req.facility_id)
-                ps = [s for s in (ct or []) if "pickle" in (s.get("surface") or "").lower()]
-                if ps:
-                    surface = ps[0]["surface"]
-            except Exception:
-                pass
+            # Reviewed classification, not a name heuristic.
+            import court_surfaces
+            ct = await api.court_types(req.facility_id, kind=None)
+            res = court_surfaces.resolve_surfaces(req.facility_id, ct or [])
+            if res.unknown:
+                logger.warning(res.diagnostic())
+            if not res.court:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"no court surfaces at facility {req.facility_id}")
+            surface = res.court[0]
 
             # Get court ID for the requested court name.
             courts = await api.available_courts(
@@ -1644,14 +1658,29 @@ async def live_courts(
         async with PlayByPointAPI(cookies=cookies, club_slug=slug, proxy=PROXY_URL) as api:
             api._user_id = user_id
             # Get surface type
-            surfaces = VENUE_SURFACES.get(facility_id)
+            # Reviewed classification, not VENUE_SURFACES (3 of 21 venues,
+            # one entry malformed) nor the "pickle" name heuristic. Both are
+            # gone. Unfiltered on purpose: kind=reservation hides
+            # members_only and training_court.
+            import court_surfaces
+            try:
+                ct = await api.court_types(facility_id, kind=None)
+                res = court_surfaces.resolve_surfaces(facility_id, ct or [])
+                if res.unknown:
+                    logger.warning(res.diagnostic())
+                surfaces = res.court
+            except Exception as e:
+                logger.warning("facility %s: surface resolution failed (%s)",
+                               facility_id, e)
+                surfaces = []
             if not surfaces:
-                try:
-                    ct = await api.court_types(facility_id)
-                    ps = [s for s in (ct or []) if "pickle" in (s.get("surface") or "").lower()]
-                    surfaces = [ps[0]["surface"]] if ps else ["pickleball"]
-                except Exception:
-                    surfaces = ["pickleball"]
+                # No fallback to "pickleball". Most venues do not have that
+                # surface, and PBP answers an unknown surface with an empty
+                # 200 that reads as "fully booked" -- the failure this whole
+                # layer exists to remove. Return nothing, visibly.
+                return {"court_blocks": [], "date": date,
+                        "facility_id": facility_id,
+                        "error": "no_court_surfaces"}
             court_slots: dict = {}
             sec_shift_map: dict = {}
             for surface in surfaces:

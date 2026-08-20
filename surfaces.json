@@ -1,0 +1,135 @@
+{
+  "schema_version": 1,
+  "reviewed": "2026-08-19",
+  "classes": [
+    "COURT",
+    "NON_COURT",
+    "ALTERNATE",
+    "UNKNOWN"
+  ],
+  "notes": {
+    "COURT": "Independently contributes physical court inventory.",
+    "NON_COURT": "Never contributes court inventory. A bookable PBP resource that is not a court.",
+    "ALTERNATE": "A court-hire surface that re-exposes courts already counted under a COURT surface, through a different booking/entitlement channel. Never contributes capacity. Relevant at checkout, not at discovery.",
+    "UNKNOWN": "Not a stored class. What classify() returns for a surface absent from this file. Contributes nothing and must be reviewed."
+  },
+  "classifications": {
+    "pickleball": {
+      "class": "COURT",
+      "evidence": "13 venues; resources named 'Court 1..n'"
+    },
+    "indoor_pickleball": {
+      "class": "COURT",
+      "evidence": "The Rally, Pickleplex, Real Dill, Pickle Playground; 'Court 1 - Show Court', 'Court 2'"
+    },
+    "standard_courts": {
+      "class": "COURT",
+      "evidence": "Dink & Drive; 'Court 1'..'Court 6'"
+    },
+    "championship_courts": {
+      "class": "COURT",
+      "evidence": "Dink & Drive; 'Championship Court 7/8'. Priced separately ($59.09 vs $50)"
+    },
+    "main_courts": {
+      "class": "COURT",
+      "evidence": "Pickleholic"
+    },
+    "show_court": {
+      "class": "COURT",
+      "evidence": "Raya; 'Show Court'"
+    },
+    "drill_skill_court": {
+      "class": "COURT",
+      "evidence": "Pickleholic; resource is an explicit beginner/training court"
+    },
+    "training_court": {
+      "class": "COURT",
+      "evidence": "Picklezone; 'Training Court'. Hidden by kind=reservation, which is one reason that filter cannot drive discovery"
+    },
+    "ball_machine": {
+      "class": "NON_COURT",
+      "evidence": "Pickle4Real; 'Ball Machine 1/2'"
+    },
+    "cold_plunge": {
+      "class": "NON_COURT",
+      "evidence": "SportsWell; 'Ice Pod', 'Magnesium Pod'"
+    },
+    "compression": {
+      "class": "NON_COURT",
+      "evidence": "SportsWell; 'Compression Lounge 1-3'"
+    },
+    "cricket_net": {
+      "class": "NON_COURT",
+      "evidence": "'Cricket Net 1/2'"
+    },
+    "futsal": {
+      "class": "NON_COURT",
+      "evidence": "Eastern Indoor; 'Futsal/Netball Court 1/2'. Named 'Court' but not pickleball inventory"
+    },
+    "hydrotherapy_spa": {
+      "class": "NON_COURT",
+      "evidence": "'Hydrotherapy Spa'"
+    },
+    "infrared_sauna": {
+      "class": "NON_COURT",
+      "evidence": "'Infrared Sauna 1/2'"
+    },
+    "massage_chair": {
+      "class": "NON_COURT",
+      "evidence": "SportsWell; 'Massage Chair'"
+    },
+    "private_office": {
+      "class": "NON_COURT",
+      "evidence": "Pickle4Real; 'Office Room 1/2'"
+    },
+    "private_room": {
+      "class": "NON_COURT",
+      "evidence": "Pickle4Real; 'Meeting Room'"
+    },
+    "reformer_pilates": {
+      "class": "NON_COURT",
+      "evidence": "'Reformer Pilates 1/2'"
+    },
+    "sauna": {
+      "class": "NON_COURT",
+      "evidence": "SportsWell; 'Sauna'"
+    },
+    "members_only": {
+      "class": "ALTERNATE",
+      "inventory_bearing": false,
+      "physical_inventory": "shared",
+      "purpose": "membership_entitlement",
+      "evidence": "The Rally: 6 resources 18043-18049 named 'Court 1 Overlap'..'Court 6 Overlap', ids disjoint from indoor_pickleball 16078-16093, is_parent=false where ordinary courts are is_parent=true. Pickleplex: 4 resources 15966-16071 named 'Court 1 '..'Court 4 ' against indoor_pickleball 14833-14836. Confirmed at The Rally as a selectable court type at booking, not separate capacity.",
+      "consequence": "Discovery must materialise each physical court ONCE, from its COURT surface. Showing 'Court 1' and 'Court 1 Overlap' side by side would present one physical court as two bookable units.",
+      "open_pairing": "No link field exists between the two id sets -- the probe checked every field. Pairing is currently only inferable from names ('Court 1 Overlap' -> 'Court 1 - Show Court'; Pickleplex 'Court 1 ' with a trailing space -> 'Court 1'), which is the name-based identity 2A removed. A checkout that must book the members_only representation needs a reliable mapping first.",
+      "open_purpose": "What it grants is NOT established. Member pricing already resolves on the public surface: pricing ordinary court 16078 at The Rally returned affiliation 'V2 - Rally Member' at $25 without touching members_only. So it is probably member-only access windows or free-hour entitlement rather than pricing. Do not build checkout on the assumption that member pricing requires it."
+    }
+  },
+  "census": {
+    "observed": [
+      "ball_machine",
+      "championship_courts",
+      "cold_plunge",
+      "compression",
+      "cricket_net",
+      "drill_skill_court",
+      "futsal",
+      "hydrotherapy_spa",
+      "indoor_pickleball",
+      "infrared_sauna",
+      "main_courts",
+      "massage_chair",
+      "members_only",
+      "pickleball",
+      "private_office",
+      "private_room",
+      "reformer_pilates",
+      "sauna",
+      "show_court",
+      "standard_courts",
+      "training_court"
+    ],
+    "note": "Baseline from the unfiltered estate census, 2026-08-19, 21 surfaces across 21 active venues. A surface appearing outside this list on a later cycle is UNKNOWN and must be reviewed before it can contribute inventory."
+  },
+  "invariant": "One physical court contributes one unit of inventory regardless of how many PBP surfaces expose it."
+}

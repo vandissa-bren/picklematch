@@ -3470,10 +3470,20 @@ class PlayByPointAPI:
         )
         return (data or {}).get("facilities") or []
 
-    async def court_types(self, facility_id: int) -> list[dict]:
+    async def court_types(self, facility_id: int, kind: str | None = "reservation") -> list[dict]:
+        """
+        Facility surfaces. Pass kind=None for the UNFILTERED list.
+
+        kind='reservation' is not a court filter and cannot be treated as
+        one: it hides members_only at Pickleplex and The Rally, and
+        training_court at Picklezone, while available_courts will still
+        serve courts on those surfaces. Anything discovering court inventory
+        must pass kind=None and classify via court_surfaces instead. The
+        default is kept so existing callers are unchanged.
+        """
         return await self._get_json(
             f"/api/facilities/{facility_id}/court_types",
-            params={"kind": "reservation"},
+            params={"kind": kind} if kind else {},
         )
 
     # ----- per-day availability ----------------------------------------
