@@ -306,6 +306,18 @@ async def fetch_court_blocks_for_venue(api, facility_id: int, target_date: date,
                 f"unknown={res.unknown})")
         surfaces = res.court
 
+        # Constrain to the authoritative inventory. available_courts is a
+        # availability view and can return resources that /courts does not
+        # list as active courts -- a live cycle surfaced court 16455 at The
+        # Rally, which is absent from that facility's inventory entirely.
+        # Without this intersection the scraper caches blocks and prices for
+        # courts the booking server will refuse, so browse would offer a
+        # court that cannot be booked.
+        import court_inventory
+        inv = court_inventory.build_inventory(
+            facility_id, ct or [], await api.courts(facility_id))
+        valid_ids = {str(c.id) for c in inv.courts}
+
         combined_slots: dict = {}
         combined_shift_map: dict = {}
         for surface in surfaces:
@@ -316,6 +328,15 @@ async def fetch_court_blocks_for_venue(api, facility_id: int, target_date: date,
             await asyncio.sleep(0.5)
 
         blocks = court_slots_to_blocks(combined_slots, combined_shift_map)
+        before = len(blocks)
+        blocks = [b for b in blocks if str(b.get("court_id")) in valid_ids]
+        if len(blocks) != before:
+            dropped = {str(b.get("court_id")) for b in
+                       court_slots_to_blocks(combined_slots, combined_shift_map)
+                       if str(b.get("court_id")) not in valid_ids}
+            print(f"  !! facility {facility_id}: dropped {before - len(blocks)} "
+                  f"block(s) for court ids {sorted(dropped)} -- present in "
+                  f"available_courts but not in the facility inventory")
         updated_prices, updated_fetched_at = await fetch_missing_prices(
             api, blocks, target_date, user_id, existing_prices, existing_fetched_at
         )
