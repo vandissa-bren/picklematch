@@ -18,7 +18,7 @@ data = json.load(open(cs.CLASSIFICATION_PATH))
 
 print("\n-- every observed surface is classified --")
 observed, classified = cs.census(), set(data["classifications"])
-check("21 surfaces in the census baseline", len(observed) == 21, len(observed))
+check("22 surfaces in the census baseline", len(observed) == 22, len(observed))
 check("no census surface is unclassified", not (observed - classified),
       sorted(observed - classified))
 check("no classification without a census entry", not (classified - observed),
@@ -40,7 +40,12 @@ check("UNKNOWN is never stored, only returned",
 
 print("\n-- the seed matches the reviewed decisions --")
 check("8 COURT surfaces", len(cs.all_of(cs.COURT)) == 8, cs.all_of(cs.COURT))
-check("12 NON_COURT surfaces", len(cs.all_of(cs.NON_COURT)) == 12)
+check("13 NON_COURT surfaces", len(cs.all_of(cs.NON_COURT)) == 13)
+# function_room was found via /courts, not court_types -- the two endpoints
+# expose different resource sets.
+check("function_room -> NON_COURT", cs.classify("function_room") == cs.NON_COURT)
+check("the census records that court_types is incomplete",
+      "INCOMPLETE" in data["census"]["note"])
 check("members_only is the only ALTERNATE", cs.all_of(cs.ALTERNATE) == ["members_only"])
 for s in ("pickleball", "indoor_pickleball", "show_court", "standard_courts",
           "championship_courts", "main_courts", "drill_skill_court", "training_court"):

@@ -103,6 +103,11 @@
       "consequence": "Discovery must materialise each physical court ONCE, from its COURT surface. Showing 'Court 1' and 'Court 1 Overlap' side by side would present one physical court as two bookable units.",
       "open_purpose": "Still unproven, and NOT to be inferred. Member pricing already resolves on the public surface -- pricing ordinary court 16078 returned affiliation 'V2 - Rally Member' at $25 without touching members_only, and a Level Up Pass member at another venue was quoted $30 rather than free. So an entitlement affiliation does not mean permanently free, and the child representation may exist for member-only access windows or a weekly free-hour allowance. Whether PBP selects the representation itself from the user's membership, or expects the child court id to be submitted, must be probed before checkout uses it.",
       "pairing": "RESOLVED. children_court_ids on the parent court is the mapping, by id. No name matching is needed. An earlier probe reported no link field, but it inspected available_courts objects, which carry a thinner shape than /courts."
+    },
+    "function_room": {
+      "class": "NON_COURT",
+      "evidence": "The Rally: resource 16815 'The Rally Lounge', availability 'just_for_managers', children_court_ids empty. Present in /courts but in NEITHER the filtered nor the unfiltered court_types, which is why the court_types-driven census of 2026-08-19 never saw it.",
+      "note": "First surface found via /courts rather than court_types. It proves the two endpoints expose different resource sets, so /courts is the authoritative universe and court_types cannot be used to enumerate it."
     }
   },
   "census": {
@@ -113,6 +118,7 @@
       "compression",
       "cricket_net",
       "drill_skill_court",
+      "function_room",
       "futsal",
       "hydrotherapy_spa",
       "indoor_pickleball",
@@ -129,7 +135,20 @@
       "standard_courts",
       "training_court"
     ],
-    "note": "Baseline from the unfiltered estate census, 2026-08-19, 21 surfaces across 21 active venues. A surface appearing outside this list on a later cycle is UNKNOWN and must be reviewed before it can contribute inventory."
+    "note": "Baseline of 21 surfaces from the unfiltered court_types estate census, 2026-08-19, plus function_room found later via /courts. The court_types census is now known to be INCOMPLETE: /courts exposes surfaces that endpoint omits. Re-census from /courts before treating this list as the full estate. A surface outside this list is UNKNOWN and contributes no inventory until reviewed."
   },
-  "invariant": "One physical court contributes one unit of inventory regardless of how many PBP surfaces expose it."
+  "invariant": "One physical court contributes one unit of inventory regardless of how many PBP surfaces expose it.",
+  "architecture": {
+    "universe": "/api/facilities/{id}/courts is the authoritative set of PBP facility resources.",
+    "derivation": "Physical court inventory is DERIVED from that universe by classifying each resource's own surface. /courts is not itself a list of courts -- function_room proves it contains non-court resources.",
+    "flow": [
+      "/courts",
+      "resource.surface",
+      "classify(surface)",
+      "COURT -> physical inventory",
+      "ALTERNATE -> no inventory, pairing via children_court_ids",
+      "NON_COURT -> no inventory",
+      "UNKNOWN -> no inventory + diagnostic"
+    ]
+  }
 }
