@@ -404,6 +404,12 @@ async def _get_pbp_availability(
 
                 # Build per-court slot map.
                 court_slots: dict[str, list[int]] = {}
+                # PBP's own shift label per second-offset. The same label
+                # prices differently on weekends, so it is suffixed exactly as
+                # fetch_court_blocks and live_courts do -- the cache is keyed
+                # "{court_id}_{shift}".
+                sec_shift_map: dict[int, str] = {}
+                _is_weekend = target_date.weekday() >= 5
                 for slot in all_slots:
                     if not isinstance(slot, dict) or not slot.get("available"):
                         continue
@@ -412,6 +418,10 @@ async def _get_pbp_availability(
                         continue
                     if not (from_sec <= int(sec) < to_sec):
                         continue
+                    _shift = slot.get("shift")
+                    if _shift:
+                        sec_shift_map[int(sec)] = (
+                            f"{_shift}_weekend" if _is_weekend else _shift)
                     try:
                         courts = await api.available_courts(
                             facility_id, target_date,
@@ -437,10 +447,16 @@ async def _get_pbp_availability(
                     ccid, cname = court_key.split("|", 1)
                     secs_sorted = sorted(set(secs))
                     run_start = run_end = None
+                    run_shift = None
                     for s in secs_sorted:
+                        s_shift = sec_shift_map.get(s)
                         if run_start is None:
                             run_start = run_end = s
-                        elif s == run_end + 1800:
+                            run_shift = s_shift
+                        # Merge only while PBP's own shift label holds. A run
+                        # spanning a shift boundary would carry one price
+                        # across two tariffs.
+                        elif s == run_end + 1800 and s_shift == run_shift:
                             run_end = s
                         else:
                             dur = (run_end - run_start) // 60 + 30
@@ -451,8 +467,10 @@ async def _get_pbp_availability(
                                     "start": _sec_to_hhmm(run_start),
                                     "end": _sec_to_hhmm(run_end + 1800),
                                     "duration_min": dur,
+                                    "shift": run_shift,
                                 })
                             run_start = run_end = s
+                            run_shift = s_shift
                     if run_start is not None:
                         dur = (run_end - run_start) // 60 + 30
                         if dur >= 60:
@@ -462,37 +480,48 @@ async def _get_pbp_availability(
                                 "start": _sec_to_hhmm(run_start),
                                 "end": _sec_to_hhmm(run_end + 1800),
                                 "duration_min": dur,
+                                "shift": run_shift,
                             })
 
                 result["court_blocks"].sort(key=lambda x: (x["start"], x["court"]))
 
-                # Add indicative price from venue static data if API didn't return one.
-                from extract_thejar import _extract_price_string
-                if result["court_blocks"] and not result["court_blocks"][0].get("price"):
-                    # Try to get price for the first available block only (fast).
-                    try:
-                        first = result["court_blocks"][0]
-                        fstart = _hhmm_to_sec(first["start"])
-                        fend = _hhmm_to_sec(first["end"])
-                        # Use min 1hr for pricing.
-                        fend_price = fstart + 3600
-                        courts_data = await api.available_courts(
-                            facility_id, target_date, fstart, fend_price,
-                            surface=surface,
-                        )
-                        if courts_data:
-                            court_id = courts_data[0].get("id")
-                            price_data = await api.court_price(
-                                court_id, target_date, fstart, fend_price,
-                                user_id=user_id,
-                            )
-                            price_str = _extract_price_string(price_data)
-                            if price_str:
-                                # Apply same price to all blocks at this venue.
-                                for b in result["court_blocks"]:
-                                    b["price"] = price_str
-                    except Exception:
-                        pass
+                # Price each block from the cached court/shift table, the same
+                # way live_courts does.
+                #
+                # This replaces a stamping heuristic that fetched ONE price --
+                # for court_blocks[0], on courts_data[0], over a fixed one-hour
+                # window -- and then assigned it to every block at the venue
+                # for the whole day. Observed live at The Rally on 2026-08-20:
+                # browse showed $43.48/hr at 4pm, 5pm, 7pm, 8pm and 9pm, while
+                # the 9pm primetime slot actually costs $60. $43.48 is not any
+                # of that venue's cached prices (25 lowtime / 60 day / 60
+                # primetime) -- it was simply whatever the first available hour
+                # on an arbitrary court happened to cost. As the day advanced
+                # the stamped value drifted, so the displayed price changed
+                # without any price changing.
+                #
+                # It was also fetched with a real user_id, so one member's
+                # rate could be stamped across every block another user
+                # browsed.
+                #
+                # The invariant now: a block's price may only come from pricing
+                # applicable to THAT block. No block inherits a price because
+                # another block has one. A block with no cached entry stays
+                # unpriced -- an absent price is recoverable, a confidently
+                # wrong one is not.
+                try:
+                    _cache_rows = await _read_from_supabase("playbypoint")
+                    _row = next((r for r in _cache_rows
+                                 if r.get("id") == facility_id), {})
+                    _court_prices = _row.get("court_prices", {}) or {}
+                    for b in result["court_blocks"]:
+                        cid, shift = b.get("court_id"), b.get("shift")
+                        b["price"] = (_court_prices.get(f"{cid}_{shift}")
+                                      if cid and shift else None)
+                except Exception as e:
+                    logger.debug("court price lookup failed for %s: %s", slug, e)
+                    for b in result["court_blocks"]:
+                        b.setdefault("price", None)
 
             except Exception as e:
                 logger.debug(f"court slots failed for {slug}: {e}")
