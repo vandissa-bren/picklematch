@@ -18,7 +18,7 @@ data = json.load(open(cs.CLASSIFICATION_PATH))
 
 print("\n-- every observed surface is classified --")
 observed, classified = cs.census(), set(data["classifications"])
-check("22 surfaces in the census baseline", len(observed) == 22, len(observed))
+check("26 surfaces in the census baseline", len(observed) == 26, len(observed))
 check("no census surface is unclassified", not (observed - classified),
       sorted(observed - classified))
 check("no classification without a census entry", not (classified - observed),
@@ -40,12 +40,19 @@ check("UNKNOWN is never stored, only returned",
 
 print("\n-- the seed matches the reviewed decisions --")
 check("8 COURT surfaces", len(cs.all_of(cs.COURT)) == 8, cs.all_of(cs.COURT))
-check("13 NON_COURT surfaces", len(cs.all_of(cs.NON_COURT)) == 13)
+check("17 NON_COURT surfaces", len(cs.all_of(cs.NON_COURT)) == 17)
+# Five surfaces exist ONLY in /courts, never in court_types. That is why
+# court_types cannot define the resource universe.
+for s_ in ("event", "function_room", "golf", "golf_simulator", "massage_room"):
+    check(f"{s_} -> NON_COURT (found via /courts)",
+          cs.classify(s_) == cs.NON_COURT)
+    check(f"{s_} records how it was found",
+          "/courts" in data["classifications"][s_].get("found_via", ""))
 # function_room was found via /courts, not court_types -- the two endpoints
 # expose different resource sets.
 check("function_room -> NON_COURT", cs.classify("function_room") == cs.NON_COURT)
-check("the census records that court_types is incomplete",
-      "INCOMPLETE" in data["census"]["note"])
+check("the census records that court_types is not the universe",
+      "NOT" in data["census"]["note"] and "court_types" in data["census"]["note"])
 check("members_only is the only ALTERNATE", cs.all_of(cs.ALTERNATE) == ["members_only"])
 for s in ("pickleball", "indoor_pickleball", "show_court", "standard_courts",
           "championship_courts", "main_courts", "drill_skill_court", "training_court"):

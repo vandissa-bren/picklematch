@@ -106,8 +106,29 @@
     },
     "function_room": {
       "class": "NON_COURT",
-      "evidence": "The Rally: resource 16815 'The Rally Lounge', availability 'just_for_managers', children_court_ids empty. Present in /courts but in NEITHER the filtered nor the unfiltered court_types, which is why the court_types-driven census of 2026-08-19 never saw it.",
-      "note": "First surface found via /courts rather than court_types. It proves the two endpoints expose different resource sets, so /courts is the authoritative universe and court_types cannot be used to enumerate it."
+      "evidence": "The Rally: resource 16815 'The Rally Lounge', availability 'just_for_managers', children_court_ids empty. Present in /courts but in NEITHER the filtered nor the unfiltered court_types, which is why the court_types-driven census of 2026-08-19 never saw it. availability just_for_managers.",
+      "note": "First surface found via /courts rather than court_types. It proves the two endpoints expose different resource sets, so /courts is the authoritative universe and court_types cannot be used to enumerate it.",
+      "found_via": "/courts -- absent from court_types entirely"
+    },
+    "event": {
+      "class": "NON_COURT",
+      "evidence": "Pickle4Real (1783): 'Private Function Room', availability just_for_managers.",
+      "found_via": "/courts -- absent from court_types entirely"
+    },
+    "golf": {
+      "class": "NON_COURT",
+      "evidence": "Swing & Serve (1119): 'Desert', 'Lakes' -- golf courses, availability just_for_managers.",
+      "found_via": "/courts -- absent from court_types entirely"
+    },
+    "golf_simulator": {
+      "class": "NON_COURT",
+      "evidence": "Swing & Serve (1119): 'Trackman Bay 1'..'Trackman Bay 6', availability just_for_managers.",
+      "found_via": "/courts -- absent from court_types entirely"
+    },
+    "massage_room": {
+      "class": "NON_COURT",
+      "evidence": "Eastern Indoor (1009): 'Treatment Room', availability just_for_managers.",
+      "found_via": "/courts -- absent from court_types entirely"
     }
   },
   "census": {
@@ -118,13 +139,17 @@
       "compression",
       "cricket_net",
       "drill_skill_court",
+      "event",
       "function_room",
       "futsal",
+      "golf",
+      "golf_simulator",
       "hydrotherapy_spa",
       "indoor_pickleball",
       "infrared_sauna",
       "main_courts",
       "massage_chair",
+      "massage_room",
       "members_only",
       "pickleball",
       "private_office",
@@ -135,7 +160,7 @@
       "standard_courts",
       "training_court"
     ],
-    "note": "Baseline of 21 surfaces from the unfiltered court_types estate census, 2026-08-19, plus function_room found later via /courts. The court_types census is now known to be INCOMPLETE: /courts exposes surfaces that endpoint omits. Re-census from /courts before treating this list as the full estate. A surface outside this list is UNKNOWN and contributes no inventory until reviewed."
+    "note": "26 surfaces from the /courts estate census, 2026-08-20. This supersedes the earlier 21-surface court_types census: /courts exposed 5 surfaces court_types omits entirely (event, function_room, golf, golf_simulator, massage_room) and omitted none of its own. court_types is therefore NOT the resource universe and must not be used to enumerate one. A surface outside this list is UNKNOWN and contributes no inventory until reviewed."
   },
   "invariant": "One physical court contributes one unit of inventory regardless of how many PBP surfaces expose it.",
   "architecture": {
@@ -150,5 +175,8 @@
       "NON_COURT -> no inventory",
       "UNKNOWN -> no inventory + diagnostic"
     ]
+  },
+  "observations": {
+    "availability_field": "Every surface found only in /courts -- event, function_room, golf, golf_simulator, massage_room -- carries availability 'just_for_managers', while all COURT surfaces carry 'for_all' and members_only carries 'for_all'/'for_players'. That is a consistent pattern across the estate and a plausible reason court_types omits them: they are staff-bookable resources. Recorded as an OBSERVATION, not promoted to a classifier -- the same mistake as rating_provider, which also looked clean until it was tested. Classification stays per-surface and evidence-backed."
   }
 }
