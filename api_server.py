@@ -425,9 +425,16 @@ async def _get_pbp_availability(
                     except Exception:
                         pass
 
-                # Find bookable blocks ≥60 min.
+                # Find bookable blocks >=60 min.
                 for court_key, secs in court_slots.items():
-                    cname = court_key.split("|", 1)[1]
+                    # The id is already in the key. It was computed, used to
+                    # key the map and then dropped, so every block from this
+                    # builder identified its court by NAME only -- while
+                    # live_courts, the builder used for dates 14+ days out,
+                    # included court_id. The frontend therefore sent an id for
+                    # far dates and fell back to the name for near ones, which
+                    # is most real traffic.
+                    ccid, cname = court_key.split("|", 1)
                     secs_sorted = sorted(set(secs))
                     run_start = run_end = None
                     for s in secs_sorted:
@@ -440,6 +447,7 @@ async def _get_pbp_availability(
                             if dur >= 60:
                                 result["court_blocks"].append({
                                     "court": cname,
+                                    "court_id": ccid,
                                     "start": _sec_to_hhmm(run_start),
                                     "end": _sec_to_hhmm(run_end + 1800),
                                     "duration_min": dur,
@@ -450,6 +458,7 @@ async def _get_pbp_availability(
                         if dur >= 60:
                             result["court_blocks"].append({
                                 "court": cname,
+                                "court_id": ccid,
                                 "start": _sec_to_hhmm(run_start),
                                 "end": _sec_to_hhmm(run_end + 1800),
                                 "duration_min": dur,
