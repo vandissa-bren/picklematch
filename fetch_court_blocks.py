@@ -265,6 +265,35 @@ CANONICAL_BLOCK_FIELDS = ("court", "court_id", "start", "end", "duration_min",
                           "price", "shift")
 
 
+def prune_past_dates(by_date: dict, today_str: str) -> dict:
+    """
+    Drop by_date keys strictly before today. Returns a new dict.
+
+    Filtered against TODAY, never against the writer's own scrape window.
+    Three jobs write this key -- today+1 at :00, days 3-8 at :05, days 8-14 at
+    :07 -- so a writer pruning to its own range would delete the other jobs'
+    coverage every quarter hour and they would restore it minutes later. That
+    churn would be worse than the leak it fixes.
+
+    Only court blocks are pruned. sessions and other historical venue data are
+    untouched: nothing reads a past date's court_blocks (the one caller that
+    passes a past date, the roster lookup in MySessionsPage, reads
+    venueData.sessions), but that is not true of the rest of the record.
+
+    Malformed keys are kept rather than dropped -- deleting something we
+    cannot parse is the wrong default when the alternative is a little unused
+    data.
+    """
+    kept = {}
+    for date_str, blocks in (by_date or {}).items():
+        try:
+            if str(date_str) >= today_str:      # ISO dates sort lexically
+                kept[date_str] = blocks
+        except Exception:
+            kept[date_str] = blocks
+    return kept
+
+
 def apply_prices_to_blocks(blocks: list, court_prices: dict) -> list:
     """
     Map stored prices onto blocks using each block's real PBP shift.
@@ -482,7 +511,10 @@ async def main():
                       f"existing cache left intact")
                 return
 
-            by_date = data.get("by_date", {})
+            # Prune before merging, so a date this writer is about to write is
+            # never dropped by its own prune.
+            by_date = prune_past_dates(data.get("by_date", {}),
+                                       date.today().isoformat())
             for date_str, blocks in result["by_date"].items():
                 by_date[date_str] = blocks
             data["by_date"] = by_date
