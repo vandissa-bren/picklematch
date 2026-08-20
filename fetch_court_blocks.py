@@ -245,10 +245,25 @@ async def fetch_missing_prices(api, blocks: list, target_date: date, user_id: in
                 int(court_id), target_date, start_sec, start_sec + 3600, user_id=user_id
             )
             fare = (price_data or {}).get("total", {}).get("original_reservation_fare")
+            # PBP returns fare 0.0 with an EMPTY shift_prices when the venue
+            # has no tariff for that window -- not when the booking is free.
+            # A non-member gets the same 0.0 there, so it is the absence of a
+            # price. Caching it would put a $0 on the browse surface for
+            # every user in an unpriced window. None instead, so the block
+            # simply carries no price.
+            shift_prices = None
+            for _u in (price_data or {}).get("prices_per_user", []):
+                if _u.get("id") == user_id:
+                    shift_prices = (_u.get("price") or {}).get("shift_prices")
+                    break
             price = round(float(fare), 2) if fare is not None else None
+            if price == 0 and not shift_prices:
+                price = None
+                print(f"    Unpriced window {cache_key} (fare 0, no shift tariff)")
+            else:
+                print(f"    Fetched price {cache_key}: ${price}")
             new_prices[cache_key] = price
             new_fetched_at[cache_key] = now.isoformat()
-            print(f"    Fetched price {cache_key}: ${price}")
             await asyncio.sleep(0.3)
         except Exception as e:
             print(f"    price error {cache_key}: {e}")
