@@ -259,8 +259,27 @@ async def fetch_missing_prices(api, blocks: list, target_date: date, user_id: in
     return new_prices, new_fetched_at
 
 
+# The canonical stored block. Every writer of availability_cache.by_date must
+# produce this shape, so a reader never has to know which job wrote a row.
+CANONICAL_BLOCK_FIELDS = ("court", "court_id", "start", "end", "duration_min",
+                          "price", "shift")
+
+
 def apply_prices_to_blocks(blocks: list, court_prices: dict) -> list:
-    """Map stored prices onto blocks using each block's real PBP shift."""
+    """
+    Map stored prices onto blocks using each block's real PBP shift.
+
+    Preserves court_id and shift. This function previously rebuilt each block
+    from five fields, reading court_id and shift to look up the price and then
+    dropping both -- so the scraper computed the identity correctly and
+    discarded it in the last step before saving. Every stored block therefore
+    identified its court by NAME only, which is what forced the servers to
+    re-resolve names against a live availability call, and what made the
+    frontend fall back to the name contract for every near-term date.
+
+    shift is kept for the same reason: a reader that has the shift can price a
+    block itself instead of trusting a price frozen at scrape time.
+    """
     result = []
     for block in blocks:
         court_id = block.get("court_id")
@@ -269,10 +288,12 @@ def apply_prices_to_blocks(blocks: list, court_prices: dict) -> list:
 
         result.append({
             "court": block["court"],
+            "court_id": court_id,
             "start": block["start"],
             "end": block["end"],
             "duration_min": block["duration_min"],
             "price": price,
+            "shift": shift,
         })
     return result
 
