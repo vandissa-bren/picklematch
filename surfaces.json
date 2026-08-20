@@ -107,7 +107,28 @@
     "function_room": {
       "class": "NON_COURT",
       "evidence": "The Rally: resource 16815 'The Rally Lounge', availability 'just_for_managers', children_court_ids empty. Present in /courts but in NEITHER the filtered nor the unfiltered court_types, which is why the court_types-driven census of 2026-08-19 never saw it.",
-      "note": "First surface found via /courts rather than court_types. It proves the two endpoints expose different resource sets, so /courts is the authoritative universe and court_types cannot be used to enumerate it."
+      "note": "First surface found via /courts rather than court_types. It proves the two endpoints expose different resource sets, so /courts is the authoritative universe and court_types cannot be used to enumerate it.",
+      "found_via": "/courts -- absent from court_types entirely"
+    },
+    "event": {
+      "class": "NON_COURT",
+      "evidence": "Event booking resource. Classified from the /courts census of 2026-08-20; resource names pending -- fill from /tmp/courts_census.json.",
+      "found_via": "/courts -- absent from court_types entirely"
+    },
+    "golf": {
+      "class": "NON_COURT",
+      "evidence": "Golf resource, not pickleball court inventory. /courts census 2026-08-20.",
+      "found_via": "/courts -- absent from court_types entirely"
+    },
+    "golf_simulator": {
+      "class": "NON_COURT",
+      "evidence": "Golf simulator bay. Not court inventory. /courts census 2026-08-20.",
+      "found_via": "/courts -- absent from court_types entirely"
+    },
+    "massage_room": {
+      "class": "NON_COURT",
+      "evidence": "Treatment room, same family as massage_chair, sauna and compression at the wellness venues. /courts census 2026-08-20.",
+      "found_via": "/courts -- absent from court_types entirely"
     }
   },
   "census": {
@@ -118,13 +139,17 @@
       "compression",
       "cricket_net",
       "drill_skill_court",
+      "event",
       "function_room",
       "futsal",
+      "golf",
+      "golf_simulator",
       "hydrotherapy_spa",
       "indoor_pickleball",
       "infrared_sauna",
       "main_courts",
       "massage_chair",
+      "massage_room",
       "members_only",
       "pickleball",
       "private_office",
@@ -135,7 +160,7 @@
       "standard_courts",
       "training_court"
     ],
-    "note": "Baseline of 21 surfaces from the unfiltered court_types estate census, 2026-08-19, plus function_room found later via /courts. The court_types census is now known to be INCOMPLETE: /courts exposes surfaces that endpoint omits. Re-census from /courts before treating this list as the full estate. A surface outside this list is UNKNOWN and contributes no inventory until reviewed."
+    "note": "26 surfaces from the /courts estate census, 2026-08-20. This supersedes the earlier 21-surface court_types census: /courts exposed 5 surfaces court_types omits entirely (event, function_room, golf, golf_simulator, massage_room) and omitted none of its own. court_types is therefore NOT the resource universe and must not be used to enumerate one. A surface outside this list is UNKNOWN and contributes no inventory until reviewed."
   },
   "invariant": "One physical court contributes one unit of inventory regardless of how many PBP surfaces expose it.",
   "architecture": {

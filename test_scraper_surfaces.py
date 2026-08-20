@@ -111,9 +111,15 @@ valid = {str(c.id) for c in inv.courts}
 check("inventory ids are the physical courts only", valid == {"16078", "16090"}, valid)
 check("a court absent from inventory is filtered out", "16455" not in valid)
 check("the members_only child is filtered out", "18043" not in valid)
-check("function_room is filtered out (unclassified -> UNKNOWN)", "16815" not in valid)
-check("function_room raises the unknown-surface diagnostic",
-      "function_room" in (inv.diagnostic() or ""), inv.diagnostic())
+check("function_room is filtered out (NON_COURT)", "16815" not in valid)
+# It is classified now, so it must NOT raise a diagnostic -- a decision
+# already taken is silent. An unseen surface still must.
+check("a classified NON_COURT raises no diagnostic", inv.diagnostic() is None, inv.diagnostic())
+inv_new = ci.build_inventory(1664, RALLY_TYPES, RALLY_COURTS + [
+    {"id": 99, "name": "Padel 1", "surface": "padel", "archived": False}])
+check("an unseen surface still raises UNKNOWN_SURFACE",
+      "padel" in (inv_new.diagnostic() or ""), inv_new.diagnostic())
+check("and contributes no inventory", 99 not in {c.id for c in inv_new.courts})
 check("fetch_court_blocks intersects blocks with inventory",
       "valid_ids" in fcb and "build_inventory" in fcb)
 check("and reports what it dropped rather than dropping silently",
