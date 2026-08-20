@@ -32,7 +32,8 @@ check("every class is one of the three storable",
 mo = data["classifications"]["members_only"]
 check("members_only records it is not inventory-bearing",
       mo.get("inventory_bearing") is False)
-check("members_only records the unresolved pairing", bool(mo.get("open_pairing")))
+check("members_only records the RESOLVED pairing (children_court_ids)",
+      "children_court_ids" in mo.get("pairing", ""))
 check("members_only records that its purpose is unproven", bool(mo.get("open_purpose")))
 check("UNKNOWN is never stored, only returned",
       not any(e["class"] == cs.UNKNOWN for e in data["classifications"].values()))

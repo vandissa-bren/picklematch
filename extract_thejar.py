@@ -3470,6 +3470,15 @@ class PlayByPointAPI:
         )
         return (data or {}).get("facilities") or []
 
+    async def courts(self, facility_id: int) -> list[dict]:
+        """
+        The facility's court INVENTORY -- every court with id, name, surface,
+        archived and children_court_ids, regardless of whether anything is
+        free. available_courts cannot serve this purpose: it is
+        availability-filtered, so a fully booked court is simply absent.
+        """
+        return await self._get_json(f"/api/facilities/{facility_id}/courts")
+
     async def court_types(self, facility_id: int, kind: str | None = "reservation") -> list[dict]:
         """
         Facility surfaces. Pass kind=None for the UNFILTERED list.

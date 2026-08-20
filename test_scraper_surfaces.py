@@ -88,3 +88,44 @@ print()
 if failures:
     print(f"{len(failures)} FAILURES: {failures}"); sys.exit(1)
 print("all checks passed")
+
+print("\n-- scraper writes only courts the inventory recognises --")
+# available_courts is an availability view and can return resources /courts
+# does not list: a live cycle surfaced court 16455 at The Rally, absent from
+# that facility's inventory. Caching blocks for it would offer a court the
+# booking server refuses.
+import court_inventory as ci
+RALLY_TYPES = [{"surface": "indoor_pickleball"}, {"surface": "members_only"}]
+RALLY_COURTS = [
+    {"id": 16078, "name": "Court 1 - Show Court", "surface": "indoor_pickleball",
+     "archived": False, "children_court_ids": [18043]},
+    {"id": 16090, "name": "Court 3", "surface": "indoor_pickleball",
+     "archived": False, "children_court_ids": [18046]},
+    {"id": 18043, "name": "Court 1 Overlap", "surface": "members_only",
+     "archived": False, "children_court_ids": []},
+    {"id": 16815, "name": "The Rally Lounge", "surface": "function_room",
+     "archived": False, "children_court_ids": []},
+]
+inv = ci.build_inventory(1664, RALLY_TYPES, RALLY_COURTS)
+valid = {str(c.id) for c in inv.courts}
+check("inventory ids are the physical courts only", valid == {"16078", "16090"}, valid)
+check("a court absent from inventory is filtered out", "16455" not in valid)
+check("the members_only child is filtered out", "18043" not in valid)
+check("function_room is filtered out (unclassified -> UNKNOWN)", "16815" not in valid)
+check("function_room raises the unknown-surface diagnostic",
+      "function_room" in (inv.diagnostic() or ""), inv.diagnostic())
+check("fetch_court_blocks intersects blocks with inventory",
+      "valid_ids" in fcb and "build_inventory" in fcb)
+check("and reports what it dropped rather than dropping silently",
+      "not in the facility inventory" in open("fetch_court_blocks.py").read())
+
+print("\n-- members_only pairing is by id, not by name --")
+parent = next(c for c in RALLY_COURTS if c["id"] == 16078)
+check("children_court_ids gives the mapping", parent["children_court_ids"] == [18043])
+check("the child declares no children of its own",
+      next(c for c in RALLY_COURTS if c["id"] == 18043)["children_court_ids"] == [])
+
+print()
+if failures:
+    print(f"{len(failures)} FAILURES: {failures}"); sys.exit(1)
+print("all checks passed")
