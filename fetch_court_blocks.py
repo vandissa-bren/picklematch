@@ -283,18 +283,28 @@ async def fetch_court_blocks_for_venue(api, facility_id: int, target_date: date,
     Returns (blocks_with_prices, updated_court_prices, updated_fetched_at).
     """
     try:
-        if facility_id in VENUE_SURFACES:
-            surfaces = VENUE_SURFACES[facility_id]
-        else:
-            surface = "pickleball"
-            try:
-                ct = await api.court_types(facility_id)
-                ps = [s for s in (ct or []) if "pickle" in (s.get("surface") or "").lower()]
-                if ps:
-                    surface = ps[0]["surface"]
-            except Exception:
-                pass
-            surfaces = [surface]
+        # Surfaces come from the reviewed classification, not from
+        # VENUE_SURFACES (3 of 21 venues) or the "pickle" name heuristic.
+        # That heuristic took the FIRST surface whose name contained
+        # "pickle", so it missed Dink & Drive's championship_courts,
+        # Pickleholic's drill_skill_court and Picklezone's training_court --
+        # while it would have accepted a futsal surface had one been named
+        # differently. Unfiltered on purpose: kind=reservation hides real
+        # court surfaces.
+        import court_surfaces
+        ct = await api.court_types(facility_id, kind=None)
+        res = court_surfaces.resolve_surfaces(facility_id, ct or [])
+        if res.unknown:
+            print(f"  !! {res.diagnostic()}")
+        if not res.court:
+            # No classified court surface. Raising beats scraping nothing
+            # quietly: an empty result here would look exactly like a venue
+            # with no availability, which is how The Rally stayed broken.
+            raise RuntimeError(
+                f"facility {facility_id}: no court surfaces "
+                f"(non_court={res.non_court}, alternate={res.alternate}, "
+                f"unknown={res.unknown})")
+        surfaces = res.court
 
         combined_slots: dict = {}
         combined_shift_map: dict = {}

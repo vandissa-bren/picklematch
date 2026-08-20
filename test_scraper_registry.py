@@ -59,11 +59,16 @@ check("summary line printed", "CYCLE SUMMARY" in cb)
 check("empty venues named individually", 'EMPTY' in cb)
 check("failed venues named individually", 'FAILED' in cb)
 
-print("\n-- surfaces and pricing untouched (criteria 5, 6) --")
-check("VENUE_SURFACES still consulted as before",
-      "if facility_id in VENUE_SURFACES:" in cb)
-check("no surface discovery introduced here",
-      "court_types" not in cb.split("CYCLE SUMMARY")[0] or True)
+print("\n-- pricing logic untouched by the registry migration --")
+# The surface guard that used to live here asserted VENUE_SURFACES was still
+# consulted. That was correct while surfaces were deliberately out of scope;
+# they have since been migrated to the reviewed classification, and
+# test_scraper_surfaces.py now covers that. Kept here: the registry
+# migration must not have touched pricing.
+check("court price fetching is unchanged",
+      "original_reservation_fare" in cb or "court_prices" in cb)
+check("no pricing recalculation introduced",
+      "duration / 60" not in cb)
 
 print()
 if failures:
